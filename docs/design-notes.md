@@ -1,6 +1,32 @@
 # ASGI function-profile specification notes
 
-Status: exploratory design notes
+Status: exploratory design notes; not an official ASGI proposal
+
+## Problem and motivation
+
+ASGI usefully separates application code from servers and defines protocol
+behavior for HTTP, WebSocket, lifespan, and extensions. Its application
+interface, however, requires the coroutine calling convention even when an
+application and its dependencies are otherwise organized around ordinary
+Python calls.
+
+The goal of this project is to find out whether ASGI's protocol model can
+support an equally complete ordinary-function calling convention. In practical
+implementations today, concurrency would normally come from operating-system
+threads. Free-threaded Python makes that model capable of CPU parallelism as
+well as I/O concurrency, but the interface must also work on conventional
+Python builds. In the future, a widely adopted green-thread runtime could
+provide the same calling convention without dedicating a native thread to each
+active execution context.
+
+This is not an argument that ordinary functions never wait, or that coroutine
+code necessarily permits useful concurrency. Either convention can prevent
+other work from progressing if its runtime does not schedule around a waiting
+operation. Conversely, an ordinary call can transparently suspend a green
+thread. For that reason, this document avoids using "blocking" and
+"non-blocking" as names for the two profiles.
+
+## Design hypothesis
 
 The proposed direction is to extend ASGI with multiple execution profiles over
 the same scopes and event protocols:
@@ -27,6 +53,87 @@ context while they wait.
 The function profile initially uses operating-system threads. Its interface
 should not depend on that implementation: a future server could use green
 threads without changing application code.
+
+The long-term preference is one shared ASGI protocol family with multiple
+execution profiles, rather than a competing protocol that copies ASGI's event
+definitions. The experiment must not assume that ASGI will adopt that model,
+however. An independent specification and adapter can establish whether it is
+coherent and useful first.
+
+## Terminology
+
+The working terms are:
+
+- **Coroutine profile:** an application is called as a coroutine, and
+  `receive()` and `send()` produce awaitables.
+- **Function profile:** an application is called as an ordinary function, and
+  `receive()` and `send()` return their results directly.
+- **Application context:** the configured application, middleware, lifespan,
+  and shared lifespan state that form one deployment unit within a worker.
+- **Execution context:** the task, native thread, green thread, or equivalent
+  context running one scope invocation.
+
+"Stackful profile" was considered but rejected as the primary name. It
+describes an observable programming model, but it can be implemented by a
+runtime whose own design is described as stackless. "Synchronous profile" is
+familiar shorthand, but too easily conflates an ordinary calling convention
+with blocking a native thread.
+
+The name `asgi-function-profile` is similarly only a descriptive repository
+name. It does not claim official ASGI status or settle the eventual name of an
+independent interface.
+
+## Relationship to WSGI and ASGI
+
+### This is not WSGI 2
+
+WSGI is centered on an HTTP request/response exchange and an iterable response
+body. The function profile instead retains ASGI's scopes and bidirectional
+events. This is necessary for WebSockets, lifespan, disconnect notification,
+request-body streaming, response backpressure, and protocol extensions.
+
+"All the features of ASGI" means that an ASGI protocol specification should be
+expressible in either execution profile without changing its scope and event
+shapes. It does not mean that every current implementation-specific extension
+will work automatically; extensions that expose awaitables, event-loop objects,
+file descriptors, or other runtime resources require an explicit audit.
+
+### Why retain `receive` and `send` callables
+
+A response generator is attractive for a simple, one-way HTTP response, but it
+does not by itself model ASGI's full-duplex conversation. The server must be
+able to deliver inbound events even when the application has no outbound event
+to yield, and the application may need to receive and send concurrently. A
+single generator resumption/yield handshake also becomes awkward when child
+execution contexts participate in a scope.
+
+Separate `receive` and `send` capabilities provide:
+
+- independent inbound and outbound flow;
+- a natural point at which the server can apply backpressure;
+- uniform treatment of HTTP, WebSocket, and lifespan events;
+- middleware that can wrap either direction independently; and
+- a possible concurrency model for application-created child execution
+  contexts.
+
+The choice of callables is therefore not inherently coroutine-specific. The
+function profile should initially preserve ASGI's event API and change only how
+those calls suspend and return. A generator-based convenience layer could be
+built on top for protocols where it fits.
+
+### Compatibility target
+
+The first implementation should be an adapter that lets a function-profile
+application run behind an existing ASGI server. That establishes compatibility
+with real protocol handling while keeping the experimental surface small. A
+native function-profile server can follow if the adapter exposes limitations
+that are inherent to crossing between execution models.
+
+Profile selection must be explicit. Automatically treating a callable as one
+profile based only on `inspect.iscoroutinefunction()` is not reliable for
+decorators, callable instances, middleware, or wrappers.
+
+## Audit structure
 
 The issues below fall into three categories: clarifications that would improve
 ASGI generally, changes needed in the shared specification to support execution
@@ -240,6 +347,72 @@ This is primarily implementation guidance rather than a wire-protocol rule:
 - The ASGI specification should permit servers to reject or defer scopes when
   their configured execution capacity is exhausted.
 
+## Experimental validation
+
+The proposal should be judged against executable behavior rather than only an
+interface sketch. A minimal adapter and conformance suite should demonstrate:
+
+- an HTTP request whose body arrives in multiple events;
+- a response streamed in multiple events with bounded buffering;
+- a disconnect that wakes or fails the relevant operation;
+- a long-lived, bidirectional WebSocket scope;
+- lifespan startup, shared state, and shutdown;
+- multiple scopes running with genuine overlap on native threads;
+- isolation of `contextvars` between scopes;
+- well-defined behavior when the application returns with outstanding work;
+  and
+- at least one ASGI extension, to test whether the profile boundary composes.
+
+The adapter should expose ordinary calls to application code without requiring
+that code to invoke an event loop, submit work to a thread pool, or use an
+async-to-sync bridge itself. Internally, the adapter may use those mechanisms to
+connect to an ASGI server.
+
+Performance is relevant, particularly capacity consumption by long-lived
+scopes, but raw throughput is not the first success criterion. The first test is
+whether the semantics are complete, predictable, and implementable without
+unbounded queues or hidden loss of backpressure.
+
+## Open design questions
+
+- Is the function profile best expressed as an ASGI version, an ASGI extension,
+  standardized application metadata, or an adjacent experimental
+  specification?
+- What exact exception types represent peer disconnect, server shutdown,
+  expired capabilities, and capacity rejection?
+- Should the base contract allow one sender and one receiver in different child
+  execution contexts, or should the first version restrict both calls to the
+  application invocation's original context?
+- Does a function-profile server guarantee native-thread affinity, advertise it
+  as an optional capability, or leave it entirely outside the contract?
+- How should deadlines and cooperative cancellation be exposed without tying
+  the profile to a particular scheduler?
+- Which existing ASGI extensions rely on coroutine- or event-loop-specific
+  behavior despite using generic event dictionaries?
+- What is the smallest application-context definition that makes lifespan
+  portable across event loops, native threads, green threads, and worker
+  processes?
+- Can a bidirectional adapter preserve backpressure and cancellation faithfully
+  enough to serve as a reference implementation?
+
+## Adoption strategy
+
+This repository should first operate as an independent experiment. The intended
+sequence is:
+
+1. Publish a draft with explicit unresolved questions.
+2. Build the adapter and conformance tests.
+3. Exercise it with a small framework or realistic application.
+4. Seek implementation feedback from the broader Python threading and web
+   communities.
+5. Approach ASGI maintainers with working evidence and a narrowly scoped
+   integration proposal.
+
+The initial public claim should be "an experimental function execution profile
+using ASGI scopes and events," not that the work is already an ASGI standard.
+If upstream integration is not appropriate, the same evidence can support an
+independent interface without changing the experiment's technical value.
+
 ## Suggested proposal boundary
 
 The initial function-profile proposal should focus on:
@@ -256,3 +429,12 @@ The initial function-profile proposal should focus on:
 Tuple/list inconsistencies, optional typing, serializability conflicts, and
 general extension cleanup are worth addressing in ASGI, but they should remain
 separate proposals so they do not obscure the execution-profile change.
+
+## Reference material
+
+- [ASGI main specification](https://asgi.readthedocs.io/en/latest/specs/main.html)
+- [ASGI HTTP and WebSocket specification](https://asgi.readthedocs.io/en/latest/specs/www.html)
+- [ASGI lifespan specification](https://asgi.readthedocs.io/en/latest/specs/lifespan.html)
+- [ASGI extensions](https://asgi.readthedocs.io/en/latest/extensions.html)
+- [asgiref repository](https://github.com/django/asgiref)
+- [Python free-threading HOWTO](https://docs.python.org/3/howto/free-threading-python.html)
