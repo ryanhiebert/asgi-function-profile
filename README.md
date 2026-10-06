@@ -68,15 +68,17 @@ code.
 
 The semantic suite covers blocking receive, send backpressure, exception
 propagation, HTTP streaming, WebSockets, lifespan, overlapping scopes, and
-adapter cancellation:
+adapter cancellation. With the `server` extra installed, it also launches the
+development runner and verifies streaming, network backpressure, disconnects,
+lifespan state, and graceful shutdown through a real Uvicorn TCP connection:
 
 ```console
 uv run python -m unittest discover -s tests -v
 ```
 
-These tests validate the compatibility adapter, not a native function-profile
-server. Arbitrary Python code running in a worker thread still cannot be
-forcibly cancelled safely.
+The integration tests validate the complete compatibility path through
+Uvicorn, not a native function-profile server. Arbitrary Python code running in
+a worker thread still cannot be forcibly cancelled safely.
 
 ## Naming
 
