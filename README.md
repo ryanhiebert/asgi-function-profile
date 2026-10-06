@@ -182,6 +182,50 @@ a disconnect before its reply arrives; this example makes no exactly-once or
 replay guarantee. It still uses a worker per socket. These are boundaries of the
 experiment, not additional requirements on the function profile.
 
+### What a full worker pool taught us
+
+The capacity experiment runs the same adapter and Django application with an
+explicit **three-thread executor in one Uvicorn process**. These are application
+threads, not Uvicorn's `--workers` processes. A test-only launcher injects the
+executor using the adapter's existing argument; the production runner and
+adapter are unchanged. The usual runner uses the event loop's shared default
+executor, whose capacity is not fixed by this experiment.
+
+| Active application invocations | Available threads | New Django HTTP request |
+| --- | ---: | --- |
+| Lifespan + one WebSocket | 1 | Runs normally |
+| Lifespan + two WebSockets | 0 | Reaches the adapter but waits to start |
+| One of those sockets closes | 1 | Starts and returns its ordinary response |
+
+An existing WebSocket can still echo messages while HTTP is queued. The event
+loop remains responsive: the limitation is that each synchronous invocation
+retains its thread even while waiting in `receive()`. Lifespan retains a thread
+between startup and shutdown as well. In this setup, HTTP progress depends on a
+socket ending, not merely becoming idle.
+
+Shutdown with both sockets open and HTTP queued completed without hitting the
+server's two-second graceful-shutdown deadline. Clients received WebSocket
+close code 1012, lifespan shutdown ran, every started invocation finished, and
+the executor joined all its workers. A separate test disconnects a queued HTTP
+client: the invocation still waits for a free thread, then exits without leaking
+a worker; a later HTTP request succeeds. This is cooperative cleanup for the
+tested applications, not an ability to interrupt arbitrary synchronous code.
+
+This exposes an adapter scheduling limitation, not a new calling-convention
+requirement. A larger fixed pool moves the threshold but retains the same
+failure mode. The adapter currently has no admission limit or rejection policy
+for queued scopes. Reserving capacity by scope type could protect HTTP/lifespan;
+bounded admission could reject overload; another scheduler could avoid a native
+thread per idle invocation. Those are candidates for a later experiment, not
+implemented solutions or new rules in the profile. These tests characterize
+resource exhaustion, not throughput or a production connection limit.
+
+The reproducible tests are in [tests/test_capacity.py](tests/test_capacity.py):
+
+```console
+uv run --extra server --extra django --group test python -m unittest discover -s tests -p test_capacity.py -v
+```
+
 ## Tests
 
 The semantic suite covers blocking receive, send backpressure, exception

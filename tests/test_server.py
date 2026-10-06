@@ -37,18 +37,7 @@ class UvicornTestCase(unittest.TestCase):
         environment = os.environ.copy()
         environment["ASGI_FUNCTION_PROFILE_TEST_STATE"] = self.state.name
         self.server = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "asgi_function_profile",
-                self.application_target,
-                "--app-dir",
-                str(FIXTURES),
-                "--port",
-                str(self.port),
-                "--log-level",
-                "critical",
-            ],
+            self.server_command(),
             env=environment,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -57,6 +46,13 @@ class UvicornTestCase(unittest.TestCase):
         self.addCleanup(self.cleanup_server)
         self.wait_for_file("lifespan-started")
         self.wait_for_server()
+
+    def server_command(self):
+        return [
+            sys.executable, "-m", "asgi_function_profile", self.application_target,
+            "--app-dir", str(FIXTURES), "--port", str(self.port),
+            "--log-level", "critical",
+        ]
 
     def cleanup_server(self) -> None:
         # Release a gated producer even if its assertion failed.
