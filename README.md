@@ -11,9 +11,9 @@ def application(scope, receive, send):
 
 The function profile represents waiting as an ordinary function call. A call
 may suspend its current execution context until it can return; the interface
-does not prescribe how that suspension is implemented. Initial implementations
-will use operating-system threads, while future implementations could use green
-threads or another stack-preserving scheduler.
+does not prescribe how that suspension is implemented. The current experiments
+use both operating-system threads and gevent greenlets with the same application
+interface and adapter.
 
 This project is exploratory and is not an official part of ASGI.
 
@@ -39,6 +39,54 @@ The experiment aims to:
 The project does not assume that regular functions inherently block native
 threads. "Coroutine profile" and "function profile" describe calling
 conventions, not scheduling implementations.
+
+## Contributing and continuing the experiment
+
+This README is also the contributor entry point: `AGENTS.md` is a symlink to
+it, so people and agents receive the same guidance. Keep that guidance here.
+Read [SPEC.md](SPEC.md) for the proposed contract and
+[docs/design-notes.md](docs/design-notes.md) for its rationale and translation
+audit before changing the interface. The implementation sections below record
+the evidence, deployment choices, and known limitations.
+
+The guiding practical target is **existing synchronous Django views without
+rewriting them**, alongside synchronous WebSockets. Application code should not
+need `async`/`await`, explicit bridges, or scheduler management to use the
+function profile. Select the profile at the deployment boundary.
+
+Keep these boundaries when contributing:
+
+- Treat coroutine ASGI as the complete semantic specification. Only a
+  non-mechanical difference justifies additional profile semantics; lifespan
+  affinity is the substantive difference identified so far. Do not broaden
+  this work into resolving unrelated ASGI ambiguities.
+- Keep scheduling, connection limits, overload policy, and framework-specific
+  conveniences out of the profile unless evidence shows they are required.
+  The two workers deliberately have different execution policies; neither
+  defines the portable interface.
+- Prefer a small executable experiment over a new framework or abstraction.
+  Get it working, analyze whether it can be simpler, then simplify and record
+  the learnings. The experimental code may ultimately be discarded.
+- Explain outcomes and remaining limits with as little conceptual overhead as
+  possible. Separate demonstrated behavior from inference and untested claims.
+- Use the [full test command](#tests) for integration changes. Optional
+  dependencies can otherwise make whole suites skip; report skipped or blocked
+  checks rather than treating them as validation.
+
+### Current position and remaining questions
+
+The adapter, Django HTTP integration, authenticated synchronous WebSockets,
+native-thread worker, and gevent worker are implemented and tested. The gevent
+experiment demonstrates that the calling convention can survive a scheduler
+change without changing application code, the Django handler, or the adapter.
+
+No next implementation milestone has been selected after gevent. Explicit
+remaining questions include a first ASGI extension conformance example and the
+compatibility of other database drivers and libraries with the execution
+backends. The adoption sequence in the design notes is a longer-term direction,
+not an instruction to implement every candidate, publish, or contact upstream.
+Agree on the next experiment before expanding scope, and update this section
+as that direction changes.
 
 ## Reference implementation
 
@@ -259,8 +307,9 @@ browser's exact HTTP origin.
 - No new profile semantics were needed. The experiment demonstrates
   compatibility and incremental streaming, not a performance improvement.
 
-The limitations are concrete: the compatibility adapter uses one worker per
-active scope, including lifespan and long-lived sockets. A disconnect during
+The initial native-thread experiment uses one executor thread per active
+scope, including lifespan and long-lived sockets. The gevent worker described
+above instead uses a greenlet per invocation. A disconnect during
 body reception is handled, and a failed send closes response resources, but
 this handler does not monitor disconnects concurrently while a view or iterator
 runs. Arbitrary synchronous work cannot be interrupted; older ASGI send
@@ -309,9 +358,11 @@ abstraction was necessary.
 Login and session-cookie updates remain HTTP operations. If authentication
 requires rotating a session cookie, the socket refuses it and requires a fresh
 HTTP login. Other session backends, custom authentication middleware, push
-revocation, broadcast, and capacity are untested. A committed note may survive
+revocation, and broadcast are untested. Capacity behavior is covered by the
+thread-pool and gevent experiments, not a production load benchmark. A committed note may survive
 a disconnect before its reply arrives; this example makes no exactly-once or
-replay guarantee. It still uses a worker per socket. These are boundaries of the
+replay guarantee. A socket retains a thread or greenlet for its lifetime,
+depending on the backend. These are boundaries of the
 experiment, not additional requirements on the function profile.
 
 ### What a full worker pool taught us
@@ -346,11 +397,12 @@ tested applications, not an ability to interrupt arbitrary synchronous code.
 This exposes an adapter scheduling limitation, not a new calling-convention
 requirement. A larger fixed pool moves the threshold but retains the same
 failure mode. The adapter currently has no admission limit or rejection policy
-for queued scopes. The Gunicorn worker now gives lifespan a separate thread and
-sizes the remaining pool with `--threads`, but HTTP and WebSockets still compete
-for that pool. Reserving HTTP capacity, rejecting overload with bounded
-admission, or avoiding a native thread per idle invocation remain candidates
-for later experiments, not new rules in the profile. These tests characterize
+for queued scopes. The `ThreadedUvicornWorker` gives lifespan a separate thread
+and sizes the remaining pool with `--threads`, but HTTP and WebSockets still
+compete for that pool. The gevent experiment avoids a native thread per idle
+invocation without adding an application-concurrency cap. Reserving HTTP
+capacity or rejecting overload with bounded admission remain possible separate
+experiments, not new rules in the profile. These tests characterize
 resource exhaustion, not throughput or a production connection limit.
 
 The reproducible tests are in [tests/test_capacity.py](tests/test_capacity.py):
@@ -360,6 +412,19 @@ uv run --extra server --extra django --group test python -m unittest discover -s
 ```
 
 ## Tests
+
+For the complete suite, including both Gunicorn workers and Django, use a POSIX
+host and install all optional dependencies:
+
+```console
+uv sync --locked --all-extras --group test
+uv run --locked --all-extras --group test python -m unittest discover -s tests -v
+```
+
+Integration tests start local HTTP/WebSocket servers and worker subprocesses;
+they need permission to bind loopback sockets. Inspect the test summary for
+skips when running in a different environment. The commands below are useful
+for narrower setups, but do not necessarily exercise every backend.
 
 The semantic suite covers blocking receive, send backpressure, exception
 propagation, HTTP streaming, WebSockets, lifespan, overlapping scopes, and

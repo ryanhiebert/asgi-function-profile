@@ -42,13 +42,12 @@ application and its dependencies are otherwise organized around ordinary
 Python calls.
 
 The goal of this project is to find out whether ASGI's protocol model can
-support an equally complete ordinary-function calling convention. In practical
-implementations today, concurrency would normally come from operating-system
-threads. Free-threaded Python makes that model capable of CPU parallelism as
-well as I/O concurrency, but the interface must also work on conventional
-Python builds. In the future, a widely adopted green-thread runtime could
-provide the same calling convention without dedicating a native thread to each
-active execution context.
+support an equally complete ordinary-function calling convention. The current
+experiments use both operating-system threads and gevent greenlets. The latter
+demonstrates the calling convention without dedicating a native thread to each
+active execution context. Free-threaded Python also motivates the native-thread
+model's potential for CPU parallelism, but that has not been validated here;
+the interface must also work on conventional Python builds.
 
 This is not an argument that ordinary functions never wait, or that coroutine
 code necessarily permits useful concurrency. Either convention can prevent
@@ -81,9 +80,9 @@ awaitables. The function profile uses regular function calls that return their
 results directly; those calls may transparently suspend the current execution
 context while they wait.
 
-The function profile initially uses operating-system threads. Its interface
-should not depend on that implementation: a future server could use green
-threads without changing application code.
+The initial implementation used operating-system threads. The gevent experiment
+now uses the same interface and adapter without changing application code,
+providing evidence that the profile is independent of that initial scheduler.
 
 The coroutine ASGI specification remains the complete semantic specification.
 The function profile is a small transformation of its application calling
@@ -287,7 +286,9 @@ connect to an ASGI server.
 
 Performance is relevant, but raw throughput is not the first success criterion.
 The first test is whether the adapter preserves the coroutine specification's
-observable behavior without unbounded queues or hidden loss of backpressure.
+observable behavior, particularly send completion and backpressure. Admission
+queues and resource limits are separate implementation policies; the profile
+does not require a fixed concurrency limit.
 
 ## Reference adapter result
 
@@ -300,7 +301,11 @@ Executable tests demonstrate delayed receive, send backpressure, exception
 propagation, streaming HTTP messages, bidirectional WebSockets, lifespan,
 overlapping scopes, and release of a blocked bridge operation when the outer
 ASGI invocation is cancelled. The same adapter and an ordinary-function echo
-application have also run successfully behind Uvicorn.
+application have also run successfully behind Uvicorn. Subsequent experiments
+exercise unchanged synchronous Django views and authenticated WebSockets through
+native-thread and gevent-backed Uvicorn workers. See the [README](../README.md)
+for the current results, test commands, and backend-specific limitations. The
+ASGI extension conformance example listed above remains outstanding.
 
 Closing the bridge can release a thread waiting in `receive()` or `send()`. It
 cannot interrupt arbitrary Python code executing between those calls. Long-lived
@@ -319,8 +324,11 @@ be preserved.
 
 ## Adoption strategy
 
-This repository should first operate as an independent experiment. The intended
-sequence is:
+This repository operates as an independent experiment. The original intended
+sequence is retained below as adoption context, not the current task list.
+The draft, adapter, and realistic Django experiments now exist; extension
+conformance remains incomplete, and no next post-gevent milestone has been
+selected. Publishing and outreach require a separate decision.
 
 1. Publish a draft with explicit unresolved questions.
 2. Build the adapter and conformance tests.
