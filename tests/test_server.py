@@ -23,12 +23,15 @@ def unused_tcp_port() -> int:
         return listener.getsockname()[1]
 
 
-@unittest.skipUnless(UVICORN_AVAILABLE, "requires the server extra")
-class UvicornIntegrationTests(unittest.TestCase):
+class UvicornTestCase(unittest.TestCase):
+    """Shared subprocess harness; subclasses supply an application target."""
+
+    application_target = "server_app:application"
     server: subprocess.Popen[str]
 
     def setUp(self) -> None:
         self.state = tempfile.TemporaryDirectory()
+        self.addCleanup(self.state.cleanup)
         self.state_path = Path(self.state.name)
         self.port = unused_tcp_port()
         environment = os.environ.copy()
@@ -38,7 +41,7 @@ class UvicornIntegrationTests(unittest.TestCase):
                 sys.executable,
                 "-m",
                 "asgi_function_profile",
-                "server_app:application",
+                self.application_target,
                 "--app-dir",
                 str(FIXTURES),
                 "--port",
@@ -51,15 +54,17 @@ class UvicornIntegrationTests(unittest.TestCase):
             stderr=subprocess.STDOUT,
             text=True,
         )
+        self.addCleanup(self.cleanup_server)
         self.wait_for_file("lifespan-started")
         self.wait_for_server()
 
-    def tearDown(self) -> None:
-        try:
-            if self.server.poll() is None:
-                self.stop_server()
-        finally:
-            self.state.cleanup()
+    def cleanup_server(self) -> None:
+        # Release a gated producer even if its assertion failed.
+        self.marker("stream-release").touch()
+        if self.server.poll() is None:
+            self.stop_server()
+        else:
+            self.server.communicate()
 
     def marker(self, name: str) -> Path:
         return self.state_path / name
@@ -90,6 +95,7 @@ class UvicornIntegrationTests(unittest.TestCase):
 
     def connect(self, *, receive_buffer: int | None = None) -> socket.socket:
         connection = socket.socket()
+        self.addCleanup(connection.close)
         if receive_buffer is not None:
             connection.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, receive_buffer)
         connection.settimeout(5)
@@ -112,6 +118,9 @@ class UvicornIntegrationTests(unittest.TestCase):
         )
         return output
 
+
+@unittest.skipUnless(UVICORN_AVAILABLE, "requires the server extra")
+class UvicornIntegrationTests(UvicornTestCase):
     def test_streaming_reaches_the_client_before_the_application_returns(self) -> None:
         with self.connect() as connection:
             connection.sendall(
@@ -125,7 +134,9 @@ class UvicornIntegrationTests(unittest.TestCase):
 
             response = b""
             while b"3\r\nhel\r\n" not in response:
-                response += connection.recv(4096)
+                data = connection.recv(4096)
+                self.assertTrue(data, "connection closed before the first chunk")
+                response += data
 
             self.assertIn(b"x-lifespan-state: ready", response.lower())
             self.assertFalse(self.marker("stream-finished").exists())

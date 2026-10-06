@@ -12,6 +12,10 @@ dependencies = []
 
 [project.optional-dependencies]
 server = ["uvicorn>=0.30"]
+django = ["Django>=5.2,<5.3"]
+
+[dependency-groups]
+test = ["websockets>=15"]
 
 [project.scripts]
 asgi-function = "asgi_function_profile.cli:main"
