@@ -13,6 +13,7 @@ dependencies = []
 [project.optional-dependencies]
 server = ["uvicorn>=0.30"]
 django = ["Django>=5.2,<5.3"]
+gunicorn = ["gunicorn>=23", "uvicorn-worker>=0.3", "uvicorn>=0.30"]
 
 [dependency-groups]
 test = ["websockets>=15"]

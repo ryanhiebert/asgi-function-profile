@@ -27,6 +27,7 @@ class UvicornTestCase(unittest.TestCase):
     """Shared subprocess harness; subclasses supply an application target."""
 
     application_target = "server_app:application"
+    shutdown_signal = signal.SIGINT
     server: subprocess.Popen[str]
 
     def setUp(self) -> None:
@@ -42,6 +43,7 @@ class UvicornTestCase(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            start_new_session=(os.name == "posix"),
         )
         self.addCleanup(self.cleanup_server)
         self.wait_for_file("lifespan-started")
@@ -99,11 +101,15 @@ class UvicornTestCase(unittest.TestCase):
         return connection
 
     def stop_server(self) -> str:
-        self.server.send_signal(signal.SIGINT)
+        self.server.send_signal(self.shutdown_signal)
         try:
             output = self.server.communicate(timeout=5)[0]
         except subprocess.TimeoutExpired:
-            self.server.kill()
+            if os.name == "posix":
+                # Include any worker children of this test's server process.
+                os.killpg(self.server.pid, signal.SIGKILL)
+            else:
+                self.server.kill()
             output = self.server.communicate()[0]
             self.fail(f"server did not shut down cleanly:\n{output}")
 

@@ -64,6 +64,54 @@ curl --data-binary 'hello' http://127.0.0.1:8000/
 The example echoes `hello` without using `async` or `await` in application
 code.
 
+## Gunicorn worker
+
+Gunicorn can load the same function application directly using the optional
+thread-based worker (on a POSIX host):
+
+```console
+uv sync --extra gunicorn --extra django --group test
+uv run gunicorn examples.django_demo.application:application \
+  --worker-class asgi_function_profile.gunicorn.ThreadWorker \
+  --workers 2 --threads 8 --bind 127.0.0.1:8000
+```
+
+For the Django demo, initialize its database and user as described below first.
+The `test` dependency group supplies the WebSocket backend for this example;
+the `gunicorn` extra alone does not install a WebSocket backend. For another
+project, replace the application target with its function-profile entry point.
+
+Selecting `ThreadWorker` selects the function profile at deployment: application
+code does not import the adapter. The worker subclasses the maintained
+[Uvicorn worker](https://github.com/Kludex/uvicorn-worker) and wraps the loaded
+application with the existing `FunctionProfileAdapter`. Gunicorn manages
+processes; Uvicorn handles HTTP/WebSockets; the adapter runs application calls
+in native threads. No new launcher or scheduling mechanism is introduced.
+
+`--workers` controls **processes**; `--threads N` gives each process N application
+threads shared by HTTP requests and WebSocket connections. Lifespan has a
+separate single-thread executor, so it does not consume a request slot. Pools
+are created after forking and joined before worker exit, including with
+`--preload`. Gunicorn's default is one application thread per process; choose
+more to serve HTTP alongside open WebSockets.
+
+Idle WebSockets still occupy application threads. When all N slots are busy,
+new invocations queue until one finishes; `--threads` is not a connection or
+queue limit. The `asgi-function` development runner remains available and keeps
+using the event loop's default executor.
+
+The Django HTTP and authentication/socket tests also run through this worker.
+Tests cover graceful `SIGTERM` shutdown with an authenticated socket open,
+lifespan shutdown, and joined application threads before Gunicorn's worker-exit
+hook. Capacity tests exercise the default single application thread and an
+explicit three-thread pool: lifespan leaves all slots available, open sockets
+fill the pool, closing a socket releases queued HTTP, and shutdown joins both
+pools. A separate smoke test exercises two worker processes with `--preload`.
+The integration retains Gunicorn's SIGTERM handler so Uvicorn's signal replay
+can return through normal executor and worker cleanup. Gunicorn may still
+force-terminate workers that outlive its graceful timeout; arbitrary synchronous
+work cannot be safely interrupted in a thread.
+
 ## Django experiment
 
 The optional Django 5.2 integration runs existing synchronous views and
@@ -214,10 +262,11 @@ tested applications, not an ability to interrupt arbitrary synchronous code.
 This exposes an adapter scheduling limitation, not a new calling-convention
 requirement. A larger fixed pool moves the threshold but retains the same
 failure mode. The adapter currently has no admission limit or rejection policy
-for queued scopes. Reserving capacity by scope type could protect HTTP/lifespan;
-bounded admission could reject overload; another scheduler could avoid a native
-thread per idle invocation. Those are candidates for a later experiment, not
-implemented solutions or new rules in the profile. These tests characterize
+for queued scopes. The Gunicorn worker now gives lifespan a separate thread and
+sizes the remaining pool with `--threads`, but HTTP and WebSockets still compete
+for that pool. Reserving HTTP capacity, rejecting overload with bounded
+admission, or avoiding a native thread per idle invocation remain candidates
+for later experiments, not new rules in the profile. These tests characterize
 resource exhaustion, not throughput or a production connection limit.
 
 The reproducible tests are in [tests/test_capacity.py](tests/test_capacity.py):
@@ -243,6 +292,8 @@ To include the Django and real WebSocket tests explicitly:
 ```console
 uv run --extra server --extra django --group test python -m unittest discover -s tests -v
 ```
+
+Add `--extra gunicorn` to include the Gunicorn integration tests as well.
 
 The integration tests validate the complete compatibility path through
 Uvicorn, not a native function-profile server. Arbitrary Python code running in
