@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "asgi-function-profile"
+version = "0.1.0.dev0"
+description = "Experimental ordinary-function execution profile for ASGI"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+server = ["uvicorn>=0.30"]
+
+[project.scripts]
+asgi-function = "asgi_function_profile.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/asgi_function_profile"]
