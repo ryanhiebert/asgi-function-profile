@@ -17,33 +17,66 @@ threads or another stack-preserving scheduler.
 
 This project is exploratory and is not an official part of ASGI.
 
+The current draft specification is [SPEC.md](SPEC.md). Design rationale and the
+translation audit remain in [docs/design-notes.md](docs/design-notes.md).
+
 ## Direction
 
 The experiment aims to:
 
 - reuse ASGI scopes, events, and protocol specifications;
-- define a regular-function application calling convention;
-- support HTTP, WebSocket, lifespan, streaming, and extensions;
-- specify concurrency, backpressure, disconnect, and shutdown semantics;
+- derive a regular-function calling convention mechanically from ASGI's
+  coroutine convention;
+- identify only the existing runtime assumptions that cannot be translated
+  mechanically;
+- preserve HTTP, WebSocket, streaming, extensions, and their existing
+  semantics unchanged;
+- resolve lifespan's event-loop affinity for the function form;
 - demonstrate interoperability with an existing ASGI server; and
-- determine whether coroutine and function execution profiles can eventually
-  share one ASGI specification.
+- determine whether the function form can be specified as a small profile over
+  the existing coroutine specification.
 
 The project does not assume that regular functions inherently block native
 threads. "Coroutine profile" and "function profile" describe calling
 conventions, not scheduling implementations.
 
-## Current work
+## Reference implementation
 
-The [design notes](docs/design-notes.md) contain the initial audit of ASGI,
-including:
+A dependency-free adapter runs each function-profile scope invocation in an
+executor worker. Ordinary `receive()` and `send()` calls bridge to the actual
+ASGI awaitables and wait for their completion, preserving backpressure and
+exception propagation.
 
-- language that could be clarified for ASGI generally;
-- shared concepts needed to support multiple execution profiles; and
-- behavior that must be specified uniquely for the function profile.
+Application code does not import or construct that adapter. The development
+runner establishes the profile at the deployment boundary:
 
-The next milestone is a minimal function-profile-to-ASGI adapter with executable
-tests for HTTP streaming, WebSockets, lifespan, backpressure, and disconnects.
+```console
+uv sync --extra server
+uv run asgi-function examples.echo:application
+```
+
+Then, in another terminal:
+
+```console
+curl --data-binary 'hello' http://127.0.0.1:8000/
+```
+
+The example echoes `hello` without using `async` or `await` in application
+code.
+
+## Tests
+
+The semantic suite covers blocking receive, send backpressure, exception
+propagation, HTTP streaming, WebSockets, lifespan, overlapping scopes, and
+adapter cancellation:
+
+```console
+uv run python -m unittest discover -s tests -v
+```
+
+These tests validate the compatibility adapter, not a native function-profile
+server. Arbitrary Python code running in a worker thread still cannot be
+forcibly cancelled safely.
 
 ## Naming
 

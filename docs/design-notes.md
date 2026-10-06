@@ -2,6 +2,37 @@
 
 Status: exploratory design notes; not an official ASGI proposal
 
+## Lifespan domains
+
+A **lifespan domain** consists of one lifespan invocation and the other scope
+invocations governed by it. When lifespan is supported:
+
+- startup completes before the other scope invocations in the domain begin;
+- shutdown begins after those scope invocations end; and
+- each such scope receives the existing shallow copy of that lifespan's
+  `state` namespace.
+
+For the coroutine form, a lifespan domain corresponds to the event loop that
+processes its scopes, preserving ASGI's existing affinity rule.
+
+For the function profile, membership in the same lifespan domain does not
+imply execution on the same native thread. Associated scope invocations may
+execute on different threads and may overlap. Values placed in lifespan
+`state` must therefore be suitable for access from those invocations. An
+implementation may offer a stronger affinity guarantee, but portable
+applications cannot depend on one.
+
+A function-profile adapter inherits the lifespan domains established by its
+underlying ASGI server. A native function-profile server chooses stable domain
+boundaries appropriate to its worker and application topology; it does not
+create a separate lifespan merely for each request thread.
+
+## Execution environment
+
+A function-profile application is invoked as an ordinary callable. It is not
+required to run on the main thread or in an event loop. The profile otherwise
+imposes no additional scheduling model.
+
 ## Problem and motivation
 
 ASGI usefully separates application code from servers and defines protocol
@@ -54,11 +85,14 @@ The function profile initially uses operating-system threads. Its interface
 should not depend on that implementation: a future server could use green
 threads without changing application code.
 
-The long-term preference is one shared ASGI protocol family with multiple
-execution profiles, rather than a competing protocol that copies ASGI's event
-definitions. The experiment must not assume that ASGI will adopt that model,
-however. An independent specification and adapter can establish whether it is
-coherent and useful first.
+The coroutine ASGI specification remains the complete semantic specification.
+The function profile is a small transformation of its application calling
+convention, plus explicit replacements for the few runtime assumptions that
+cannot be translated mechanically. The profiles therefore do not need to be
+independent specifications over a newly invented common base.
+
+An independent profile and adapter can establish whether that transformation
+is coherent and useful without first restructuring ASGI itself.
 
 ## Terminology
 
@@ -68,10 +102,8 @@ The working terms are:
   `receive()` and `send()` produce awaitables.
 - **Function profile:** an application is called as an ordinary function, and
   `receive()` and `send()` return their results directly.
-- **Application context:** the configured application, middleware, lifespan,
-  and shared lifespan state that form one deployment unit within a worker.
-- **Execution context:** the task, native thread, green thread, or equivalent
-  context running one scope invocation.
+- **Lifespan domain:** one lifespan invocation and the other scope invocations
+  governed by it.
 
 "Stackful profile" was considered but rejected as the primary name. It
 describes an observable programming model, but it can be implemented by a
@@ -104,8 +136,8 @@ A response generator is attractive for a simple, one-way HTTP response, but it
 does not by itself model ASGI's full-duplex conversation. The server must be
 able to deliver inbound events even when the application has no outbound event
 to yield, and the application may need to receive and send concurrently. A
-single generator resumption/yield handshake also becomes awkward when child
-execution contexts participate in a scope.
+single generator resumption/yield handshake makes that full-duplex exchange
+awkward.
 
 Separate `receive` and `send` capabilities provide:
 
@@ -113,8 +145,7 @@ Separate `receive` and `send` capabilities provide:
 - a natural point at which the server can apply backpressure;
 - uniform treatment of HTTP, WebSocket, and lifespan events;
 - middleware that can wrap either direction independently; and
-- a possible concurrency model for application-created child execution
-  contexts.
+- direct correspondence with the existing ASGI event API.
 
 The choice of callables is therefore not inherently coroutine-specific. The
 function profile should initially preserve ASGI's event API and change only how
@@ -129,223 +160,112 @@ with real protocol handling while keeping the experimental surface small. A
 native function-profile server can follow if the adapter exposes limitations
 that are inherent to crossing between execution models.
 
-Profile selection must be explicit. Automatically treating a callable as one
-profile based only on `inspect.iscoroutinefunction()` is not reliable for
-decorators, callable instances, middleware, or wrappers.
+The initial adapter supplies the profile boundary explicitly by wrapping a
+function-profile application in a coroutine-profile ASGI application. The
+proposal therefore does not need profile negotiation, a new scope key, or
+callable introspection.
 
-## Audit structure
+## Audit rule
 
-The issues below fall into three categories: clarifications that would improve
-ASGI generally, changes needed in the shared specification to support execution
-profiles, and behavior unique to the function profile.
+This experiment does not try to clarify or generalize ASGI as a prerequisite.
+Instead, it takes coroutine ASGI as canonical and asks of each statement:
 
-## Clarify or improve ASGI generally
+> Can the function form preserve this requirement merely by replacing
+> coroutine invocation and awaitable completion with ordinary calls and direct
+> returns?
 
-These issues already exist in coroutine ASGI and can be addressed independently
-of the function profile.
+If so, the profile incorporates the requirement unchanged through the following
+mechanical translation:
 
-- Define what returning from `send()` guarantees, including its relationship to
-  buffering and backpressure.
-- Specify whether concurrent `send()` or `receive()` calls are allowed and how
-  message ordering works.
-- Define ownership and mutation rules for scopes and event dictionaries.
-- State whether `receive` and `send` remain valid after the application returns.
-- Make behavior after disconnect consistent, particularly whether a subsequent
-  `send()` is a no-op or raises an exception.
-- State explicitly that shallow copies of lifespan `state` still contain shared
-  values.
-- Distinguish an unsupported scope, especially lifespan, from a genuine
-  application startup failure.
-- Clarify the use of "connection" when referring to a physical socket, HTTP
-  request, HTTP/2 stream, or application scope.
-- Resolve the conflict between lists, tuples, and arbitrary synchronous
-  `Iterable` values in scopes and messages.
-- Resolve the distinction between a missing optional key and a key whose value
-  is `None`, including in the canonical typing definitions.
-- Clarify which events must be serializable and how resource-bearing extensions,
-  such as zero-copy sends containing file descriptors, fit that requirement.
-- State that the same application and middleware objects may handle overlapping
-  scopes.
+| Coroutine specification | Function profile |
+| --- | --- |
+| async application callable | ordinary application callable |
+| call and await the application | call the application |
+| awaitable `receive` | ordinary `receive` returning the event |
+| awaitable `send` | ordinary `send` returning after the same operation completes |
+| exception raised by awaiting a call | exception raised by the ordinary call |
 
-## Generalize ASGI to support execution profiles
+Removing `async` and `await` does not change event shapes, ordering,
+backpressure, error behavior, scope lifetime, or any protocol-specific
+requirement. Existing ambiguities are inherited too; they are not enlarged into
+this proposal merely because they may also be worth resolving in ASGI.
 
-These concepts belong in the shared or base specification rather than either
-individual execution profile.
+## Translation audit
 
-### Application context
+### Base ASGI specification
 
-Define an **application context** (or **lifespan domain**) independently of event
-loops and operating-system threads. An application context contains:
+The base specification's profile-specific wording is mechanical:
 
-- One configured application and middleware stack.
-- One lifespan session.
-- One lifespan-state namespace.
-- All scope invocations that share that lifespan and state.
+- The overview describes applications as asynchronous callables running as
+  `async`/`await`-compatible coroutines on the main thread and in an event loop.
+  The function profile replaces that execution declaration with an ordinary
+  callable and makes no event-loop or main-thread guarantee.
+- The Applications section's coroutine signature and awaitable `receive` and
+  `send` definitions map directly to the function signature and calls.
+- Middleware's awaitable callables and Error Handling's references to errors
+  raised from awaitables map directly to ordinary calls.
 
-A multiprocess server normally has one application context in each worker
-process. A coroutine server may have one per event loop. A threaded
-implementation of the function profile normally has one per worker process, not
-one per request thread.
+These substitutions need to be stated, but they do not require a new shared
+specification or new semantics.
 
-### Execution context
+The legacy ASGI 2 two-callable application form is not part of the initial
+profile. The function profile corresponds to the ASGI 3 single-callable form.
 
-Define an **execution context** as the context in which one scope invocation
-runs. An execution context may be an asyncio task, an operating-system thread,
-or a green thread, depending on the selected profile and server.
+### Protocol specifications
 
-### Lifespan
+The HTTP, WebSocket, and TLS scope and event specifications contain no
+event-loop or awaitable requirements and do not require semantic changes. Their
+calls are governed by the base application's calling convention. The same is
+true for protocol extensions unless an individual extension explicitly exposes
+an event loop, awaitable, or another runtime-affine object; such extensions can
+be evaluated individually without changing the core profile.
 
-Replace the generic "once per event loop/thread" wording with "once per
-application context." Each profile can then explain how its runtime maps
-application contexts onto event loops, processes, threads, or other schedulers.
+### Lifespan is not mechanical
 
-### Profile selection
+The lifespan specification makes a stronger promise than coroutine syntax:
 
-The server must know the execution profile before invoking the application, so
-scope metadata cannot perform the initial negotiation. Selection must happen
-out of band through deployment configuration, standardized application
-metadata, or an explicit adapter. Servers should not rely solely on coroutine
-function introspection, which is unreliable around decorators and callable
-objects.
+- lifespan runs once per event loop that processes requests;
+- lifespan and its requests run in the same event loop; and
+- lifespan state may consequently contain event-loop-affine resources.
 
-The selected profile can still be exposed to applications and middleware:
+Replacing "event loop" with "thread" is not equivalent. A function-profile
+server may use many request threads for one application deployment, and running
+a separate lifespan on every transient or pooled request thread would change
+both resource ownership and observable startup and shutdown behavior.
 
-```python
-scope["asgi"] = {
-    "version": "4.0",
-    "spec_version": "2.5",
-    "execution": "coroutine",  # or "function"
-}
-```
+This is the one substantive translation problem found by the audit. The
+lifespan-domain rule at the beginning of this document resolves it without
+requiring the coroutine specification to be refactored around general
+application or execution contexts.
 
-The exact names and version numbers are placeholders.
+## Deferred ASGI issues
 
-### Shared lifecycle rules
+The earlier audit identified several worthwhile questions: send completion,
+concurrent calls and ordering, object mutation, capability lifetime,
+post-disconnect behavior, optional values, serializability, and overlapping
+scope invocations. None is caused by translating the coroutine interface into
+ordinary calls. They should remain independent ASGI work rather than expand
+the initial function-profile proposal.
 
-The base specification should define:
+## Candidate function-profile wording
 
-- Which scopes belong to an application context and share lifespan state.
-- When a scope invocation begins and ends.
-- When server-provided `receive` and `send` capabilities become invalid.
-- That work using those capabilities must not outlive the invocation.
-- General disconnect and cleanup obligations, while allowing profiles to define
-  different interruption mechanisms.
-
-## Rules unique to the function profile
-
-These requirements describe regular functions and their threaded or
-green-threaded execution. They should live in the function profile rather than
-the generic ASGI protocol specifications.
+These are the additions to the incorporated coroutine specification that the
+initial function profile is expected to need.
 
 ### Calling convention
 
 - The application is an ordinary callable.
 - `receive()` returns an event directly, after waiting if necessary.
-- `send(event)` returns `None` directly, after waiting if necessary, or raises
-  an exception.
+- `send(event)` returns directly when the corresponding coroutine-profile call
+  would complete, or raises the corresponding exception.
 - Waiting may transparently suspend the current execution context; it does not
   imply that an operating-system thread must remain blocked.
 
-### Parallel invocation
+### Lifespan
 
-- Separate scope invocations may run simultaneously on different operating-system
-  threads.
-- Applications, middleware, and shared lifespan values must tolerate true
-  parallel access.
-- A server may serialize invocations for debugging or compatibility, but a
-  portable application cannot rely on serialization.
-
-### Callable affinity and concurrency
-
-- `receive` and `send` may be transferred to child execution contexts belonging
-  to the same scope.
-- At most one `receive()` may be outstanding for a scope.
-- The application must serialize calls to `send()` unless a future version
-  defines concurrent-send ordering.
-- The server must permit these calls from an execution context other than the
-  one that initially entered the application.
-- Calls for different scopes may occur simultaneously.
-
-### Thread affinity
-
-- Initial implementations will normally keep an invocation on one native
-  thread, supporting existing thread-affine synchronous libraries.
-- Portable applications should not depend on native-thread identity unless the
-  server advertises a thread-affinity capability.
-- This preserves a path to green-thread implementations that may not map one
-  logical execution context permanently to one native thread.
-
-### Context-local state
-
-- Each scope invocation should begin with an independent
-  `contextvars.Context`.
-- Context changes in one scope must not leak into another.
-- Lifespan-to-request data should pass through `scope["state"]`, not accidental
-  thread-context inheritance.
-- Raw `threading.local()` behavior is not portable to all prospective green-thread
-  implementations.
-
-### Lifespan state and parallelism
-
-- Each scope receives its own top-level shallow copy of lifespan state.
-- Values inside that mapping may be accessed simultaneously by multiple scopes.
-- Shared values must therefore be concurrency-safe.
-- Pools, registries, immutable configuration, and synchronized services are
-  appropriate shared values; unsynchronized thread-affine connections are not.
-
-### Backpressure and message ownership
-
-- `send()` blocks when the server's bounded output capacity is exhausted.
-- Returning means the server has accepted the event; it does not mean the peer
-  has received the bytes.
-- An event becomes server-owned when `send()` begins, and the application must
-  not mutate it afterward.
-- An event returned by `receive()` becomes application-owned.
-- Applications treat the original scope as read-only. Middleware copies it
-  before making changes.
-
-### Disconnect and cancellation
-
-- Disconnect wakes an outstanding `receive()`.
-- A blocked or subsequent `send()` fails with a defined disconnection exception.
-- The server may discard an eventual application result after disconnect.
-- An operating-system thread executing arbitrary Python code cannot be safely
-  terminated.
-- Cancellation is therefore cooperative except at server-provided blocking
-  operations.
-- Future green-thread implementations may provide stronger interruption at
-  defined suspension points, but portable applications cannot assume arbitrary
-  interruption.
-
-### Child execution lifetime
-
-- Application-created child threads or green threads must finish or be cancelled
-  before the main application callable returns.
-- `receive` and `send` become invalid when the application returns.
-- Calls after return fail.
-- The server is not responsible for discovering or joining arbitrary
-  application-created threads.
-
-### Shutdown
-
-- Server shutdown unblocks outstanding server-provided `receive()` and `send()`
-  calls.
-- It cannot necessarily interrupt database, filesystem, lock, extension-module,
-  or CPU-bound application operations.
-- Implementations therefore need a graceful-shutdown interval followed by a
-  worker-level termination policy.
-
-### Capacity and admission control
-
-This is primarily implementation guidance rather than a wire-protocol rule:
-
-- A fixed-size thread pool can be occupied indefinitely by WebSockets and other
-  long-lived scopes.
-- An unbounded native thread per scope can exhaust memory or scheduler capacity.
-- Servers should expose admission limits and may use separate capacity limits
-  for short HTTP requests and long-lived scopes.
-- The ASGI specification should permit servers to reject or defer scopes when
-  their configured execution capacity is exhausted.
+The lifespan-domain rule replaces the lifespan specification's event-loop
+affinity rule. In particular, the function profile does not mechanically
+substitute "thread" for "event loop."
 
 ## Experimental validation
 
@@ -357,10 +277,7 @@ interface sketch. A minimal adapter and conformance suite should demonstrate:
 - a disconnect that wakes or fails the relevant operation;
 - a long-lived, bidirectional WebSocket scope;
 - lifespan startup, shared state, and shutdown;
-- multiple scopes running with genuine overlap on native threads;
-- isolation of `contextvars` between scopes;
-- well-defined behavior when the application returns with outstanding work;
-  and
+- multiple scopes making progress through the adapter; and
 - at least one ASGI extension, to test whether the profile boundary composes.
 
 The adapter should expose ordinary calls to application code without requiring
@@ -368,32 +285,37 @@ that code to invoke an event loop, submit work to a thread pool, or use an
 async-to-sync bridge itself. Internally, the adapter may use those mechanisms to
 connect to an ASGI server.
 
-Performance is relevant, particularly capacity consumption by long-lived
-scopes, but raw throughput is not the first success criterion. The first test is
-whether the semantics are complete, predictable, and implementable without
-unbounded queues or hidden loss of backpressure.
+Performance is relevant, but raw throughput is not the first success criterion.
+The first test is whether the adapter preserves the coroutine specification's
+observable behavior without unbounded queues or hidden loss of backpressure.
+
+## Reference adapter result
+
+The initial adapter runs each scope invocation in an executor worker. Its
+ordinary `receive()` and `send()` callables submit the corresponding awaitable
+operation to the ASGI server's event loop and wait for that operation itself to
+complete. No intermediary queue is treated as completion.
+
+Executable tests demonstrate delayed receive, send backpressure, exception
+propagation, streaming HTTP messages, bidirectional WebSockets, lifespan,
+overlapping scopes, and release of a blocked bridge operation when the outer
+ASGI invocation is cancelled. The same adapter and an ordinary-function echo
+application have also run successfully behind Uvicorn.
+
+Closing the bridge can release a thread waiting in `receive()` or `send()`. It
+cannot interrupt arbitrary Python code executing between those calls. Long-lived
+scopes also occupy executor capacity in this native-thread implementation.
+Those are implementation constraints to measure and document, not new profile
+semantics unless further experiments show that ASGI behavior cannot otherwise
+be preserved.
 
 ## Open design questions
 
-- Is the function profile best expressed as an ASGI version, an ASGI extension,
-  standardized application metadata, or an adjacent experimental
-  specification?
-- What exact exception types represent peer disconnect, server shutdown,
-  expired capabilities, and capacity rejection?
-- Should the base contract allow one sender and one receiver in different child
-  execution contexts, or should the first version restrict both calls to the
-  application invocation's original context?
-- Does a function-profile server guarantee native-thread affinity, advertise it
-  as an optional capability, or leave it entirely outside the contract?
-- How should deadlines and cooperative cancellation be exposed without tying
-  the profile to a particular scheduler?
 - Which existing ASGI extensions rely on coroutine- or event-loop-specific
   behavior despite using generic event dictionaries?
-- What is the smallest application-context definition that makes lifespan
-  portable across event loops, native threads, green threads, and worker
-  processes?
-- Can a bidirectional adapter preserve backpressure and cancellation faithfully
-  enough to serve as a reference implementation?
+- Which ASGI extension should be the first conformance example?
+- Do native-server or framework experiments expose another non-mechanical
+  difference that the adapter does not?
 
 ## Adoption strategy
 
@@ -417,18 +339,15 @@ independent interface without changing the experiment's technical value.
 
 The initial function-profile proposal should focus on:
 
-1. Application contexts and lifespan.
-2. Explicit execution-profile selection.
-3. The regular-function application calling convention.
-4. Parallel invocation and shared-state requirements.
-5. Callable affinity and single-reader/single-writer rules.
-6. Context isolation.
-7. Message ownership and backpressure.
-8. Disconnect, completion, and shutdown behavior.
+1. Incorporating the ASGI 3 coroutine specification by reference.
+2. The mechanical translation to an ordinary-function calling convention.
+3. Removing the coroutine profile's event-loop and main-thread requirements.
+4. Replacing lifespan's event-loop affinity rule.
+5. Demonstrating semantic preservation with an adapter and tests.
 
-Tuple/list inconsistencies, optional typing, serializability conflicts, and
-general extension cleanup are worth addressing in ASGI, but they should remain
-separate proposals so they do not obscure the execution-profile change.
+All other ASGI clarification and execution-policy questions remain separate
+unless implementation proves that a mechanical translation cannot preserve an
+existing requirement.
 
 ## Reference material
 
@@ -438,3 +357,5 @@ separate proposals so they do not obscure the execution-profile change.
 - [ASGI extensions](https://asgi.readthedocs.io/en/latest/extensions.html)
 - [asgiref repository](https://github.com/django/asgiref)
 - [Python free-threading HOWTO](https://docs.python.org/3/howto/free-threading-python.html)
+- [Mitti](https://github.com/grandimam/mitti), related exploratory framework
+  work pursuing ordinary synchronous application code over an ASGI boundary
