@@ -1,36 +1,26 @@
 """Gunicorn integration for ordinary function-profile applications."""
 
 import signal
-from concurrent.futures import ThreadPoolExecutor
 
 from uvicorn_worker import UvicornWorker
 
 from .adapter import FunctionProfileAdapter
+from .threads import GrowingThreadExecutor
 
 
 class ThreadedUvicornWorker(UvicornWorker):
     """Run function applications in native threads behind Uvicorn.
 
-    Gunicorn's ``--threads`` sizes the application pool in each worker process.
-    Lifespan runs in a separate thread, outside that pool.
+    Threads are reused and grow on demand, with a high fail-fast ceiling.
+    Gunicorn's ``--threads`` and ``--worker-connections`` are unused.
     """
 
     CONFIG_KWARGS = {**UvicornWorker.CONFIG_KWARGS, "interface": "asgi3"}
 
     def run(self) -> None:
-        # Create pools after forking, and join them before the worker exits.
-        with (
-            ThreadPoolExecutor(max_workers=self.cfg.threads) as requests,
-            ThreadPoolExecutor(max_workers=1) as lifespan,
-        ):
-            application = FunctionProfileAdapter(self.wsgi, executor=requests)
-            lifecycle = FunctionProfileAdapter(self.wsgi, executor=lifespan)
-
-            async def dispatch(scope, receive, send):
-                adapter = lifecycle if scope["type"] == "lifespan" else application
-                await adapter(scope, receive, send)
-
-            self.wsgi = dispatch
+        # Create the executor after forking and join it before worker exit.
+        with GrowingThreadExecutor() as executor:
+            self.wsgi = FunctionProfileAdapter(self.wsgi, executor=executor)
             super().run()
 
     def init_signals(self) -> None:

@@ -110,7 +110,8 @@ class GunicornProcessTests(GunicornCommand, test_server.UvicornTestCase):
 )
 class GunicornDefaultCapacityTests(GunicornCommand, test_server.UvicornTestCase):
     application_target = "capacity_server:measured_application"
-    application_threads = None  # Exercise Gunicorn's default: one thread.
+    application_threads = None  # No pool size is configured.
+    socket_count = 16
 
     def stop_server(self):
         output = super().stop_server()
@@ -118,7 +119,7 @@ class GunicornDefaultCapacityTests(GunicornCommand, test_server.UvicornTestCase)
                   self.marker("capacity-events").read_text().splitlines()]
         self.assertEqual(
             max(row["active"] for row in events),
-            (self.application_threads or 1) + 1,
+            self.socket_count + 2,
         )
         self.assertEqual(events[-1]["active"], 0)
         self.assertCountEqual(
@@ -145,36 +146,25 @@ class GunicornDefaultCapacityTests(GunicornCommand, test_server.UvicornTestCase)
         finally:
             connection.close()
 
-    def fill_pool(self):
-        sockets = []
-        for _ in range(self.application_threads or 1):
-            # Every configured slot is usable despite the active lifespan.
-            self.assert_http_works()
-            sockets.append(self.websocket())
-        pending = self.connect()
-        pending.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-        pending.settimeout(0.2)
-        with self.assertRaises(TimeoutError):
-            pending.recv(4096)
-        pending.settimeout(5)
+    def open_sockets(self):
+        sockets = [self.websocket() for _ in range(self.socket_count)]
+        # All sockets and lifespan stay active while another HTTP invocation
+        # starts, including when --threads is omitted or explicitly small.
+        self.assert_http_works()
         for connection in sockets:
             connection.send("still responsive")
             self.assertEqual(connection.recv(timeout=5), "still responsive")
-        return sockets, pending
+        return sockets
 
-    def test_threads_setting_bounds_requests_but_not_lifespan(self):
-        sockets, pending = self.fill_pool()
+    def test_idle_sockets_do_not_queue_http(self):
+        sockets = self.open_sockets()
         sockets[0].close()
-        response = b""
-        while data := pending.recv(4096):
-            response += data
-        self.assertIn(b"200 OK", response)
-        self.assertIn(b"Hello, world!", response)
+        self.assert_http_works()
 
-    def test_shutdown_joins_both_pools_when_request_pool_is_full(self):
+    def test_shutdown_joins_threads_with_sockets_open(self):
         from websockets.exceptions import ConnectionClosed
 
-        sockets, _ = self.fill_pool()
+        sockets = self.open_sockets()
         self.stop_server()
         for connection in sockets:
             with self.assertRaises(ConnectionClosed) as error:

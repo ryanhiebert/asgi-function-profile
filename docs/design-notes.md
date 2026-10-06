@@ -307,6 +307,14 @@ native-thread and gevent-backed Uvicorn workers. See the [README](../README.md)
 for the current results, test commands, and backend-specific limitations. The
 ASGI extension conformance example listed above remains outstanding.
 
+The native-thread Gunicorn worker now uses a reusable pool that grows on demand
+with a high fail-fast ceiling instead of a small fixed pool. This removes waiting
+for application slots when idle sockets occupy threads, without changing the
+adapter or profile. Thread creation
+errors propagate; reaching the ceiling raises a clear capacity error instead
+of admitting more work into a waiting queue. Shutdown still joins started threads. Resource usage and performance need
+production-shaped measurements.
+
 Closing the bridge can release a thread waiting in `receive()` or `send()`. It
 cannot interrupt arbitrary Python code executing between those calls. Long-lived
 scopes also occupy executor capacity in this native-thread implementation.
@@ -327,8 +335,9 @@ be preserved.
 This repository operates as an independent experiment. The original intended
 sequence is retained below as adoption context, not the current task list.
 The draft, adapter, and realistic Django experiments now exist; extension
-conformance remains incomplete, and no next post-gevent milestone has been
-selected. Publishing and outreach require a separate decision.
+conformance remains incomplete. The current direction is production-shaped
+Django compatibility and performance validation after removing the native
+worker's small fixed pool. Publishing and outreach require a separate decision.
 
 1. Publish a draft with explicit unresolved questions.
 2. Build the adapter and conformance tests.

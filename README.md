@@ -80,13 +80,18 @@ native-thread worker, and gevent worker are implemented and tested. The gevent
 experiment demonstrates that the calling convention can survive a scheduler
 change without changing application code, the Django handler, or the adapter.
 
-No next implementation milestone has been selected after gevent. Explicit
-remaining questions include a first ASGI extension conformance example and the
+The native-thread worker now reuses threads and grows on demand up to a high
+fail-fast ceiling, so idle sockets do not fill a small fixed pool needed by HTTP.
+The next validation direction is production-shaped Django compatibility and performance;
+no production application changes have been made. Explicit remaining questions
+include a first ASGI extension conformance example and the
 compatibility of other database drivers and libraries with the execution
 backends. The adoption sequence in the design notes is a longer-term direction,
 not an instruction to implement every candidate, publish, or contact upstream.
 Agree on the next experiment before expanding scope, and update this section
 as that direction changes.
+
+For Django evaluation, use the [integration guide](docs/django-integration.md).
 
 ## Reference implementation
 
@@ -121,7 +126,7 @@ thread-based worker (on a POSIX host):
 uv sync --extra gunicorn --extra django --group test
 uv run gunicorn examples.django_demo.application:application \
   --worker-class asgi_function_profile.gunicorn.ThreadedUvicornWorker \
-  --workers 2 --threads 8 --bind 127.0.0.1:8000
+  --workers 2 --bind 127.0.0.1:8000
 ```
 
 For the Django demo, initialize its database and user as described below first.
@@ -134,27 +139,32 @@ application code does not import the adapter. The worker subclasses the maintain
 [Uvicorn worker](https://github.com/Kludex/uvicorn-worker) and wraps the loaded
 application with the existing `FunctionProfileAdapter`. Gunicorn manages
 processes; Uvicorn handles HTTP/WebSockets; the adapter runs application calls
-in native threads. No new launcher or scheduling mechanism is introduced.
+in native threads. A small executor wraps Python's `ThreadPoolExecutor` to
+reuse idle threads and grow on demand.
 
-`--workers` controls **processes**; `--threads N` gives each process N application
-threads shared by HTTP requests and WebSocket connections. Lifespan has a
-separate single-thread executor, so it does not consume a request slot. Pools
-are created after forking and joined before worker exit, including with
-`--preload`. Gunicorn's default is one application thread per process; choose
-more to serve HTTP alongside open WebSockets.
+`--workers` controls **processes**. The application pool creates threads as
+needed and reuses idle threads. Its ceiling is **65,536 outstanding invocations
+per process**, including lifespan. This deliberately high ceiling is a guard,
+not a tested capacity target. Gunicorn's `--threads` and `--worker-connections`
+are unused by this worker. The executor is created after forking and joins its
+threads before worker exit, including with `--preload`. Idle threads remain
+until worker shutdown.
 
-Idle WebSockets still occupy application threads. When all N slots are busy,
-new invocations queue until one finishes; `--threads` is not a connection or
-queue limit. The `asgi-function` development runner remains available and keeps
-using the event loop's default executor.
+Idle WebSockets retain native threads, but do not fill a small fixed pool that
+queues HTTP. At the ceiling, submission raises `ThreadCapacityError` with the
+limit and an explicit explanation that the invocation was rejected instead of
+queued; the ASGI server reports the application error. OS thread-creation errors
+also propagate. No custom overload response is added. Memory, CPU, database
+connections, and other resources can constrain capacity well before this
+ceiling. The `asgi-function` development runner keeps using the event loop's
+finite default executor.
 
 The Django HTTP and authentication/socket tests also run through this worker.
 Tests cover graceful `SIGTERM` shutdown with an authenticated socket open,
 lifespan shutdown, and joined application threads before Gunicorn's worker-exit
-hook. Capacity tests exercise the default single application thread and an
-explicit three-thread pool: lifespan leaves all slots available, open sockets
-fill the pool, closing a socket releases queued HTTP, and shutdown joins both
-pools. A separate smoke test exercises two worker processes with `--preload`.
+hook. Capacity tests open 16 sockets and verify that HTTP still starts, both
+without `--threads` and with `--threads 3`; shutdown joins all invocation
+threads. A separate smoke test exercises two worker processes with `--preload`.
 The integration retains Gunicorn's SIGTERM handler so Uvicorn's signal replay
 can return through normal executor and worker cleanup. Gunicorn may still
 force-terminate workers that outlive its graceful timeout; arbitrary synchronous
@@ -223,8 +233,8 @@ Gunicorn's `--worker-connections` and `--threads` are unused by this worker;
 unlike Gunicorn's WSGI gevent worker, it leaves connection handling to Uvicorn.
 Existing timeout and protocol controls still apply. Resource-limit and overload
 policies are separate deployment concerns, not requirements of the function
-profile. The native `ThreadedUvicornWorker` still uses `--threads` to size its
-finite pool.
+profile. The native `ThreadedUvicornWorker` uses a growing reusable thread pool with a
+high fail-fast ceiling rather than a greenlet per invocation.
 
 Gevent removes the native-thread cost of idle sockets, not every source of
 blocking. CPU-bound work and non-cooperative I/O can still stall all application
@@ -397,9 +407,9 @@ tested applications, not an ability to interrupt arbitrary synchronous code.
 This exposes an adapter scheduling limitation, not a new calling-convention
 requirement. A larger fixed pool moves the threshold but retains the same
 failure mode. The adapter currently has no admission limit or rejection policy
-for queued scopes. The `ThreadedUvicornWorker` gives lifespan a separate thread
-and sizes the remaining pool with `--threads`, but HTTP and WebSockets still
-compete for that pool. The gevent experiment avoids a native thread per idle
+for queued scopes. The `ThreadedUvicornWorker` now grows its reusable pool on demand and rejects
+invocations at a high ceiling instead of queuing them, while retaining the
+native-thread cost of idle sockets. The gevent experiment avoids a native thread per idle
 invocation without adding an application-concurrency cap. Reserving HTTP
 capacity or rejecting overload with bounded admission remain possible separate
 experiments, not new rules in the profile. These tests characterize
