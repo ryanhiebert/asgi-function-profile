@@ -82,20 +82,30 @@ This is an experimental handler built on Django internals, currently scoped to
 Django 5.2; it is not a production integration or an exhaustive compatibility
 claim. Code that specifically depends on a WSGI environment still needs review.
 
-The runnable [demo](examples/django_demo/application.py) combines Django HTTP
-with an ordinary WebSocket echo function. From the repository root:
+The runnable [demo](examples/django_demo/application.py) combines Django HTTP,
+an ordinary WebSocket echo function, and authenticated private notes. From the
+repository root:
 
 ```console
 uv sync --extra server --extra django --group test
 uv run python -m django migrate --run-syncdb --settings=examples.django_demo.settings
+uv run python -m django createsuperuser --settings=examples.django_demo.settings
 uv run asgi-function examples.django_demo.application:application
 ```
 
 Try `/`, `/echo/`, `/notes/`, `/stream/`, or `/download/` over HTTP, or `/ws/`
 with a WebSocket client. The `test` group provides the optional WebSocket
 implementation used for this experiment. The demo database is local and ignored
-by Git. The demo has local-only settings and does not include an authentication
-or deployment configuration.
+by Git. The demo has local-only settings, not a production deployment
+configuration. Re-run `migrate --run-syncdb` if you used the earlier demo;
+the original notes table is retained and the new tables are added.
+
+For the authenticated example, open `http://127.0.0.1:8000/account/`, sign in
+with the account you created, and save a note. The page sends text over
+`/ws/notes/`; `/me/` reads that user's notes through an ordinary Django view.
+The socket uses the browser's existing session cookie. If you change the host
+or port, update `WEBSOCKET_ALLOWED_ORIGINS` in the demo settings to match the
+browser's exact HTTP origin.
 
 ### What the experiment established
 
@@ -113,9 +123,7 @@ or deployment configuration.
   iterator loop handles ordinary responses, streams, and files.
 - Synchronous WebSockets work beside Django on the same server, including text,
   binary messages, and disconnect. They are a separate function-profile
-  application; an HTTP Django view does not become a WebSocket handler. Django
-  authentication, sessions, and Channels integration for sockets remain future
-  work.
+  application; an HTTP Django view does not become a WebSocket handler.
 - No new profile semantics were needed. The experiment demonstrates
   compatibility and incremental streaming, not a performance improvement.
 
@@ -128,6 +136,51 @@ semantics may silently discard writes after disconnect. Long-running streams
 therefore still need an application-specific stopping policy. Async views retain
 Django's own fallback adaptation but are outside this experiment's tested path;
 async response iterators are explicitly rejected to avoid silent buffering.
+
+### What authenticated sockets taught us
+
+The second experiment adds only example code. The profile, adapter, and Django
+HTTP handler needed no changes. The socket-specific code is in
+[sockets.py](examples/django_demo/sockets.py), with three ordinary functions:
+look up a session user, bound database work, and handle socket messages.
+
+- **Django authentication is reusable, but HTTP middleware is not automatically
+  WebSocket middleware.** HTTP login/logout use Django's built-in views and full
+  session/auth/CSRF middleware. The socket builds an `ASGIRequest` from the
+  handshake and calls the request hooks of `SessionMiddleware` and
+  `AuthenticationMiddleware`. It does not run the HTTP response pipeline or
+  invent another credential format. This validates those hooks, not arbitrary
+  middleware or Channels compatibility.
+- **A connection and a database operation have different lifetimes.** The socket
+  can remain open while each message authenticates, commits its note, and closes
+  its database connections before sending or waiting again. Transactions are
+  explicit per message; Django's `ATOMIC_REQUESTS` does not apply to this loop.
+  Tests assert thread affinity and no open database connection/transaction at
+  every socket receive/send boundary, including failures.
+- **Authentication freshness is an application policy.** A fresh lookup on each
+  message avoids retaining Django's cached user for the socket's lifetime. With
+  the demo's database sessions, HTTP logout prevents the next message from
+  writing and prevents reconnection with the old cookie. An idle socket is not
+  forcibly closed at logout; concurrent work already underway can still finish.
+- **Cookie authentication needs an origin policy.** The demo accepts only exact
+  configured origins, rejecting missing, opaque, duplicate, and untrusted ones.
+  This is independent of HTTP CSRF checks. See the
+  [Channels explanation of WebSocket origins](https://channels.readthedocs.io/en/latest/topics/security.html#websockets).
+
+The tests log in over real HTTP, verify per-user note isolation, reject
+anonymous/invalid sessions, exercise logout and CSRF failures, drop a TCP
+connection, and inject an error after a database write to verify rollback and
+cleanup. The simplification pass kept all protocol-specific choices in the
+example: no consumer framework, generic middleware stack, or new scheduling
+abstraction was necessary.
+
+Login and session-cookie updates remain HTTP operations. If authentication
+requires rotating a session cookie, the socket refuses it and requires a fresh
+HTTP login. Other session backends, custom authentication middleware, push
+revocation, broadcast, and capacity are untested. A committed note may survive
+a disconnect before its reply arrives; this example makes no exactly-once or
+replay guarantee. It still uses a worker per socket. These are boundaries of the
+experiment, not additional requirements on the function profile.
 
 ## Tests
 

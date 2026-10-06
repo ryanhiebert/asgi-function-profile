@@ -7,11 +7,15 @@ from asgi_function_profile.django import get_function_application
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "examples.django_demo.settings")
 http_application = get_function_application()
 
+from .sockets import authenticated_notes
+
 
 def application(scope, receive, send):
     if scope["type"] == "http":
         return http_application(scope, receive, send)
     if scope["type"] == "websocket":
+        if scope["path"] == "/ws/notes/":
+            return authenticated_notes(scope, receive, send)
         return websocket(scope, receive, send)
     if scope["type"] == "lifespan":
         while True:

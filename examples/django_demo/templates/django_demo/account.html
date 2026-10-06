@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Private notes · Function profile experiment</title>
+<h1>Private notes for {{ user.username }}</h1>
+<p>Each message saves a note through the synchronous WebSocket handler.</p>
+<form id="note">
+  <label>Note <input id="text" maxlength="200" required></label>
+  <button id="save" disabled>Save</button>
+</form>
+<pre id="result" aria-live="polite">Connecting…</pre>
+<p><a href="/me/">Read your saved notes through Django HTTP</a></p>
+<form method="post" action="/logout/">
+  {% csrf_token %}
+  <button>Sign out</button>
+</form>
+<script>
+  const result = document.querySelector('#result');
+  const save = document.querySelector('#save');
+  const socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/notes/`);
+  socket.onopen = () => { save.disabled = false; result.textContent = 'Connected'; };
+  socket.onmessage = event => { result.textContent = event.data; };
+  socket.onclose = event => { save.disabled = true; result.textContent = `Closed (${event.code})`; };
+  socket.onerror = () => { result.textContent = 'Connection failed'; };
+  document.querySelector('#note').onsubmit = event => {
+    event.preventDefault();
+    if (socket.readyState === WebSocket.OPEN) socket.send(document.querySelector('#text').value);
+  };
+</script>
+</html>

@@ -2,10 +2,12 @@
 
 from io import BytesIO
 
+from django.contrib.auth.decorators import login_required
 from django.http import FileResponse, HttpResponse, JsonResponse, StreamingHttpResponse
+from django.shortcuts import render
 from django.views.decorators.csrf import csrf_exempt
 
-from .models import Note
+from .models import Note, PrivateNote
 
 
 def hello(request):
@@ -40,3 +42,17 @@ def stream(request):
 
 def download(request):
     return FileResponse(BytesIO(b"a file from Django\n"), filename="demo.txt")
+
+
+@login_required
+def account(request):
+    return render(request, "django_demo/account.html")
+
+
+@login_required
+def me(request):
+    return JsonResponse({
+        "username": request.user.get_username(),
+        "notes": list(PrivateNote.objects.filter(owner=request.user)
+                      .order_by("pk").values_list("text", flat=True)),
+    })

@@ -13,6 +13,7 @@ from django.conf import settings
 
 settings.MIDDLEWARE = [__name__ + ".thread_check", *settings.MIDDLEWARE]
 settings.ROOT_URLCONF = __name__
+settings.PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
 
 local = threading.local()
 
@@ -38,13 +39,16 @@ def thread_check(get_response):
 from examples.django_demo.application import application as demo_application
 from examples.django_demo.models import Note
 from examples.django_demo.urls import urlpatterns as demo_urls
+from django.contrib.auth import get_user_model
 from django.core import signals
+from django.core.management import call_command
 from django.db import connection
 from django.http import HttpResponse, StreamingHttpResponse
 from django.urls import path
 
-with connection.schema_editor() as editor:
-    editor.create_model(Note)
+call_command("migrate", run_syncdb=True, verbosity=0)
+for username in ("alice", "bob"):
+    get_user_model().objects.create_user(username=username, password="test-password")
 connection.close()
 
 
@@ -111,8 +115,36 @@ def application(scope, receive, send):
             send(message)
 
         return demo_application(scope, receive, observe)
-    try:
+    if scope["type"] != "websocket":
         return demo_application(scope, receive, send)
-    finally:
-        if scope["type"] == "websocket":
-            (STATE / "websocket-finished").touch()
+
+    thread_id = threading.get_ident()
+
+    def check_idle():
+        assert threading.get_ident() == thread_id
+        assert connection.connection is None
+        assert not connection.in_atomic_block
+
+    def checked_receive():
+        check_idle()
+        return receive()
+
+    def checked_send(message):
+        check_idle()
+        send(message)
+
+    def check_query(execute, sql, params, many, context):
+        assert threading.get_ident() == thread_id
+        result = execute(sql, params, many, context)
+        if (sql.startswith("INSERT INTO") and '"django_demo_privatenote"' in sql
+                and (STATE / "fail-note-write").exists()):
+            raise RuntimeError("injected failure after database write")
+        return result
+
+    with connection.execute_wrapper(check_query):
+        try:
+            return demo_application(scope, checked_receive, checked_send)
+        finally:
+            check_idle()
+            with (STATE / "websocket-finished").open("ab") as finished:
+                finished.write(b".")
