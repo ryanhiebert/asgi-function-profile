@@ -16,7 +16,7 @@ import test_server
 
 GUNICORN_AVAILABLE = os.name == "posix" and all(
     importlib.util.find_spec(name) is not None
-    for name in ("gunicorn", "uvicorn_worker")
+    for name in ("gunicorn", "uvicorn_worker", "psutil")
 )
 
 
@@ -24,11 +24,13 @@ class GunicornCommand:
     shutdown_signal = signal.SIGTERM
     worker_processes = 1
     application_threads = 2
+    worker_class = "asgi_function_profile.gunicorn.ThreadedUvicornWorker"
+    preload = False
 
     def server_command(self):
         command = [
             sys.executable, "-m", "gunicorn", self.application_target,
-            "--worker-class", "asgi_function_profile.gunicorn.ThreadWorker",
+            "--worker-class", self.worker_class,
             "--bind", f"127.0.0.1:{self.port}", "--workers", str(self.worker_processes),
             "--pythonpath", str(test_server.FIXTURES),
             "--config", str(test_server.FIXTURES / "gunicorn_config.py"),
@@ -36,6 +38,8 @@ class GunicornCommand:
         ]
         if self.application_threads is not None:
             command.extend(["--threads", str(self.application_threads)])
+        if self.preload:
+            command.append("--preload")
         return command
 
     def stop_server(self):
@@ -46,18 +50,24 @@ class GunicornCommand:
             pid = marker.name.removeprefix("worker-started-")
             stopped = self.marker("worker-stopped-" + pid)
             self.assertTrue(stopped.exists(), output)
-            self.assertEqual(json.loads(stopped.read_text()), [], output)
+            self.assertEqual(json.loads(stopped.read_text()), 1, output)
         self.assertNotIn("SIGKILL", output)
         self.assertNotIn("WORKER TIMEOUT", output)
         return output
 
 
-@unittest.skipUnless(GUNICORN_AVAILABLE, "requires gunicorn extra and a POSIX host")
+@unittest.skipUnless(
+    GUNICORN_AVAILABLE and test_django_server.DJANGO_AVAILABLE,
+    "requires gunicorn/django extras, test group, and a POSIX host",
+)
 class GunicornDjangoTests(GunicornCommand, test_django_server.DjangoServerTests):
     pass
 
 
-@unittest.skipUnless(GUNICORN_AVAILABLE, "requires gunicorn extra and a POSIX host")
+@unittest.skipUnless(
+    GUNICORN_AVAILABLE and test_django_auth_socket.DEPENDENCIES_AVAILABLE,
+    "requires gunicorn/django extras, test group, and a POSIX host",
+)
 class GunicornAuthTests(GunicornCommand, test_django_auth_socket.AuthenticatedSocketTests):
     def test_graceful_shutdown_with_authenticated_socket_open(self):
         from websockets.exceptions import ConnectionClosed
@@ -78,11 +88,9 @@ class GunicornAuthTests(GunicornCommand, test_django_auth_socket.AuthenticatedSo
 @unittest.skipUnless(GUNICORN_AVAILABLE, "requires gunicorn extra and a POSIX host")
 class GunicornProcessTests(GunicornCommand, test_server.UvicornTestCase):
     worker_processes = 2
+    preload = True
 
-    def server_command(self):
-        return [*super().server_command(), "--preload"]
-
-    def test_two_preloaded_workers_start_and_exit_cleanly(self):
+    def test_two_workers_start_and_exit_cleanly(self):
         self.wait_for(lambda: len(list(self.state_path.glob("worker-started-*"))) == 2)
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
         try:

@@ -14,9 +14,10 @@ dependencies = []
 server = ["uvicorn>=0.30"]
 django = ["Django>=5.2,<5.3"]
 gunicorn = ["gunicorn>=23", "uvicorn-worker>=0.3", "uvicorn>=0.30"]
+gevent = ["gevent>=25.9.1", "gunicorn>=23", "uvicorn-worker>=0.3", "uvicorn>=0.30"]
 
 [dependency-groups]
-test = ["websockets>=15"]
+test = ["websockets>=15", "psutil>=7"]
 
 [project.scripts]
 asgi-function = "asgi_function_profile.cli:main"

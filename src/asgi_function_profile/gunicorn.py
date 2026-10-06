@@ -8,7 +8,7 @@ from uvicorn_worker import UvicornWorker
 from .adapter import FunctionProfileAdapter
 
 
-class ThreadWorker(UvicornWorker):
+class ThreadedUvicornWorker(UvicornWorker):
     """Run function applications in native threads behind Uvicorn.
 
     Gunicorn's ``--threads`` sizes the application pool in each worker process.

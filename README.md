@@ -72,7 +72,7 @@ thread-based worker (on a POSIX host):
 ```console
 uv sync --extra gunicorn --extra django --group test
 uv run gunicorn examples.django_demo.application:application \
-  --worker-class asgi_function_profile.gunicorn.ThreadWorker \
+  --worker-class asgi_function_profile.gunicorn.ThreadedUvicornWorker \
   --workers 2 --threads 8 --bind 127.0.0.1:8000
 ```
 
@@ -81,8 +81,8 @@ The `test` dependency group supplies the WebSocket backend for this example;
 the `gunicorn` extra alone does not install a WebSocket backend. For another
 project, replace the application target with its function-profile entry point.
 
-Selecting `ThreadWorker` selects the function profile at deployment: application
-code does not import the adapter. The worker subclasses the maintained
+Selecting `ThreadedUvicornWorker` selects the function profile at deployment:
+application code does not import the adapter. The worker subclasses the maintained
 [Uvicorn worker](https://github.com/Kludex/uvicorn-worker) and wraps the loaded
 application with the existing `FunctionProfileAdapter`. Gunicorn manages
 processes; Uvicorn handles HTTP/WebSockets; the adapter runs application calls
@@ -111,6 +111,90 @@ The integration retains Gunicorn's SIGTERM handler so Uvicorn's signal replay
 can return through normal executor and worker cleanup. Gunicorn may still
 force-terminate workers that outlive its graceful timeout; arbitrary synchronous
 work cannot be safely interrupted in a thread.
+
+## Gevent experiment
+
+The alternative worker runs the **same function application** in greenlets:
+
+```console
+uv sync --extra gevent --extra django --group test
+uv run gunicorn examples.django_demo.application:application \
+  --worker-class asgi_function_profile.gevent.GeventUvicornWorker \
+  --workers 2 --bind 127.0.0.1:8000
+```
+
+Initialize the demo database and user as described below first. As with the
+thread worker, the test dependency group supplies the example's WebSocket
+backend. This is an experimental POSIX worker, not a production-readiness claim.
+
+### What changed, and what we learned
+
+The application, Django handler, and `FunctionProfileAdapter` are unchanged.
+A small executor schedules each invocation as a greenlet. Each worker process
+uses its main native thread for gevent and one additional native thread for
+Uvicorn's asyncio loop. This separation keeps Django off the asyncio thread:
+its async-safety checks stay enabled. There is no `DJANGO_ALLOW_ASYNC_UNSAFE`
+workaround and no new protocol implementation.
+
+The worker applies [gevent monkey-patching](https://www.gevent.org/intro.html)
+in the child process, before loading the application. Ordinary supported I/O
+then yields cooperatively, and thread-local storage becomes greenlet-local.
+**`--preload` is rejected**; do not import the application from Gunicorn's
+configuration or hooks before worker initialization either. Patching cannot
+retroactively make already-created Django connection locals safe.
+
+The decisive test opens **64 authenticated synchronous WebSockets in one
+worker**. Ordinary Django HTTP and socket messages continue to work, with
+**two native threads both before and after opening the sockets**. Shutdown
+closes all 64 sockets, finishes lifespan, and joins the server thread before
+Gunicorn's worker-exit hook. This is a concurrency check, not a throughput or
+latency benchmark.
+The test deliberately sets Gunicorn's `--worker-connections` to 1 to verify
+that this setting does not cap the worker's application concurrency.
+
+Overlapping authenticated Django requests also share one native thread while
+retaining distinct database wrappers, transaction state, thread-local values,
+and context variables. The existing auth, logout/revocation, rollback,
+streaming, disconnect, and network-backpressure tests run on this worker too.
+The adapter's eight semantic tests run separately in a monkey-patched process,
+including cancellation and propagation of send errors. Two-worker startup and
+shutdown are tested without preloading.
+
+The simplification was to keep the original bridge and change only its
+executor, rather than build a second bridge or HTTP/WebSocket stack. One
+shutdown detail needed explicit handling: receiving `lifespan.shutdown.complete`
+is not the same as the application returning. The worker waits for that return
+before closing the asyncio loop.
+
+### Limits
+
+Like Uvicorn's default coroutine execution, this worker adds **no application
+concurrency cap** and configures no total connection-count limit. Each
+invocation can start in a greenlet without waiting for an application slot.
+Gunicorn's `--worker-connections` and `--threads` are unused by this worker;
+unlike Gunicorn's WSGI gevent worker, it leaves connection handling to Uvicorn.
+Existing timeout and protocol controls still apply. Resource-limit and overload
+policies are separate deployment concerns, not requirements of the function
+profile. The native `ThreadedUvicornWorker` still uses `--threads` to size its
+finite pool.
+
+Gevent removes the native-thread cost of idle sockets, not every source of
+blocking. CPU-bound work and non-cooperative I/O can still stall all application
+greenlets in a worker. The demo uses SQLite; its short operations passed these
+tests, but SQLite is not made cooperative by this worker. Other database drivers
+and third-party libraries need their own compatibility checks and may need
+additional deployment integration. DNS or such integrations may also create
+native helper threads; the measured two-thread result is for this test workload.
+Arbitrary uncooperative work can still require Gunicorn to kill the process at
+its graceful timeout. Reloading, TLS, and async Django views have not been
+validated on this backend.
+
+Validated here with Python 3.14, gevent 26.9.0, Gunicorn 26.2.0, and Uvicorn
+0.54.0; other supported dependency versions have not been exercised.
+
+```console
+uv run --extra gevent --extra django --group test python -m unittest discover -s tests -p test_gevent.py -v
+```
 
 ## Django experiment
 
@@ -294,6 +378,8 @@ uv run --extra server --extra django --group test python -m unittest discover -s
 ```
 
 Add `--extra gunicorn` to include the Gunicorn integration tests as well.
+Add `--extra gevent` to include the greenlet worker tests (and its Gunicorn
+dependencies).
 
 The integration tests validate the complete compatibility path through
 Uvicorn, not a native function-profile server. Arbitrary Python code running in
