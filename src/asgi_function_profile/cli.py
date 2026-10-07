@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .adapter import FunctionProfileAdapter
+from .instrumentation import instrument_django
 from .types import Application
 
 
@@ -66,7 +67,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         raise AssertionError("unreachable") from error
 
     uvicorn.run(
-        FunctionProfileAdapter(application),
+        instrument_django(FunctionProfileAdapter(application)),
         host=arguments.host,
         port=arguments.port,
         log_level=arguments.log_level,

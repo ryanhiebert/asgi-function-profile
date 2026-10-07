@@ -13,11 +13,13 @@ dependencies = []
 [project.optional-dependencies]
 server = ["uvicorn>=0.30"]
 django = ["Django>=5.2,<5.3"]
+graphene = ["Django>=5.2,<5.3", "graphene-django>=3.2,<4", "graphql-core>=3.2,<3.3"]
+strawberry = ["Django>=5.2,<5.3", "strawberry-graphql>=0.327,<0.328", "graphql-core>=3.2,<3.3"]
 gunicorn = ["gunicorn>=23", "uvicorn-worker>=0.3", "uvicorn>=0.30"]
 gevent = ["gevent>=25.9.1", "gunicorn>=23", "uvicorn-worker>=0.3", "uvicorn>=0.30"]
 
 [dependency-groups]
-test = ["websockets>=15", "psutil>=7"]
+test = ["websockets>=15", "psutil>=7", "sentry-sdk==2.38.0"]
 
 [project.scripts]
 asgi-function = "asgi_function_profile.cli:main"

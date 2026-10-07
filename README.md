@@ -92,6 +92,15 @@ Agree on the next experiment before expanding scope, and update this section
 as that direction changes.
 
 For Django evaluation, use the [integration guide](docs/django-integration.md).
+Optional native-thread [GraphQL WebSocket integrations](docs/graphql-websockets.md)
+run Graphene Django and Strawberry Django schemas with ordinary subscription
+iterators. Application-specific Channels/broadcast and custom socket translation
+remain separate work; neither existing async consumers nor async generators
+are run unchanged.
+The native worker and development runner restore Sentry's outer ASGI middleware
+when the application's initialized Django integration is enabled. Tested HTTP
+instrumentation and remaining limits are in the guide's
+[Sentry section](docs/django-integration.md#sentry-on-native-threads).
 
 ## Reference implementation
 

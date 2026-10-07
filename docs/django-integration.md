@@ -99,6 +99,47 @@ File sending may differ in efficiency from WSGI server optimizations.
 
 ## Validation evidence and remaining work
 
+For native Graphene Django and Strawberry Django socket experiments, see the
+[GraphQL WebSocket guide](graphql-websockets.md), including application-side
+translation boundaries and Sentry checks.
+
+### Sentry on native threads
+
+Keep the application's existing `sentry_sdk.init(...)` configuration with
+`DjangoIntegration` enabled. Initialize it before the application is loaded by
+the native Gunicorn worker or development runner. Those deployment paths place
+the SDK's `SentryAsgiMiddleware` outside the function adapter automatically when
+the integration is enabled. No Sentry dependency or initialization is added to
+the application handler or adapter; applications without the integration keep
+their existing behavior.
+
+This wrapper is necessary because the function handler overrides Django's
+coroutine entry point, which Sentry normally patches to start transactions and
+isolate request context. The inherited Django hooks still instrument views,
+database operations, request data, and exceptions. The adapter carries the
+outer middleware's context into the native application thread.
+
+Isolated SDK 2.38.0 tests, with and without its default integrations, cover HTTP
+transactions and route names, incoming trace
+continuation, view and SQLite query spans, HTTP 500 errors captured once with
+request/user data, streaming exceptions, and user/tag/breadcrumb isolation in
+overlapping requests and on a reused thread. A real native Gunicorn deployment
+also emits a transaction with query spans into a local test transport. Nothing
+is sent to Sentry during these tests.
+
+After adding this integration, the full suite passed **84 tests with no skips**
+on the Python 3.14 environment recorded below. The isolated Sentry checks also
+passed separately with both SDK integration configurations.
+
+Custom deployments that instantiate `FunctionProfileAdapter` directly must put
+Sentry's ASGI middleware outside that adapter themselves. The gevent worker,
+WebSocket instrumentation, profiling, custom processors/integrations, and other
+SDK versions have not been validated by this check. Evaluate these separately
+when used; the tests establish specific HTTP instrumentation behavior rather
+than complete Sentry feature parity.
+
+### Earlier compatibility checks
+
 The complete suite passed **80 tests, with no skips**, on macOS ARM64 using
 Python 3.14.2, Django 5.2.17, Gunicorn 26.2.0, Uvicorn 0.54.0,
 uvicorn-worker 0.4.0, gevent 26.9.0, websockets 17.2, and psutil 7.2.2.

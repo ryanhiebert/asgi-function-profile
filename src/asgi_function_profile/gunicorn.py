@@ -5,6 +5,7 @@ import signal
 from uvicorn_worker import UvicornWorker
 
 from .adapter import FunctionProfileAdapter
+from .instrumentation import instrument_django
 from .threads import GrowingThreadExecutor
 
 
@@ -20,7 +21,9 @@ class ThreadedUvicornWorker(UvicornWorker):
     def run(self) -> None:
         # Create the executor after forking and join it before worker exit.
         with GrowingThreadExecutor() as executor:
-            self.wsgi = FunctionProfileAdapter(self.wsgi, executor=executor)
+            self.wsgi = instrument_django(
+                FunctionProfileAdapter(self.wsgi, executor=executor)
+            )
             super().run()
 
     def init_signals(self) -> None:
