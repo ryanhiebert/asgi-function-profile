@@ -97,6 +97,10 @@ run Graphene Django and Strawberry Django schemas with ordinary subscription
 iterators. Application-specific Channels/broadcast and custom socket translation
 remain separate work; neither existing async consumers nor async generators
 are run unchanged.
+A process-local [broadcast example](examples/broadcast.py) demonstrates bounded
+subscriber queues, cooperative cancellation/draining, and fresh authorization
+before event delivery through both schema integrations. Distributed delivery
+and proxy/client reconnect behavior remain unvalidated.
 The native worker and development runner restore Sentry's outer ASGI middleware
 when the application's initialized Django integration is enabled. Tested HTTP
 instrumentation and remaining limits are in the guide's

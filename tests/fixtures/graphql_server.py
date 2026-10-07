@@ -35,8 +35,17 @@ from asgi_function_profile.graphene import GrapheneDjangoWebSocket
 from asgi_function_profile.strawberry import StrawberryDjangoWebSocket
 import graphene
 import strawberry
+from examples.broadcast import Broadcast
 
 STATE = django_server.STATE
+broker = Broadcast(capacity=2)
+
+
+def updates(request, topic):
+    whoami(request)
+    return broker.subscribe(topic, authorized=lambda: request.user.__class__.objects.filter(
+        pk=request.user.pk, is_active=True,
+    ).exists())
 
 
 def context(request, params, cancelled):
@@ -86,6 +95,11 @@ def ticks(request, steps, fail=False):
 class GQuery(graphene.ObjectType):
     whoami = graphene.String(required=True)
     broken = graphene.String()
+    subscribers = graphene.Int()
+
+    def resolve_subscribers(root, info):
+        with broker.condition:
+            return len(broker.subscribers)
 
     def resolve_whoami(root, info):
         return whoami(info.context)
@@ -105,11 +119,30 @@ class AddNote(graphene.Mutation):
 
 class GMutation(graphene.ObjectType):
     add_note = AddNote.Field()
+    publish = graphene.Boolean(topic=graphene.String(required=True), value=graphene.Int(required=True))
+    drain = graphene.Boolean()
+    revoke = graphene.Boolean()
+
+    def resolve_publish(root, info, topic, value):
+        broker.publish(topic, value)
+        return True
+
+    def resolve_drain(root, info):
+        broker.drain()
+        return True
+
+    def resolve_revoke(root, info):
+        info.context.user.__class__.objects.filter(pk=info.context.user.pk).update(is_active=False)
+        return True
 
 
 class GSubscription(graphene.ObjectType):
     ticks = graphene.Int(steps=graphene.Int(default_value=3), fail=graphene.Boolean(default_value=False))
     asynchronous = graphene.Int()
+    updates = graphene.Int(topic=graphene.String(required=True))
+
+    def subscribe_updates(root, info, topic):
+        return updates(info.context, topic)
 
     def subscribe_ticks(root, info, steps, fail):
         if steps < 0:
@@ -123,6 +156,11 @@ class GSubscription(graphene.ObjectType):
 @strawberry.type
 class SQuery:
     @strawberry.field
+    def subscribers(self) -> int:
+        with broker.condition:
+            return len(broker.subscribers)
+
+    @strawberry.field
     def whoami(self, info: strawberry.Info) -> str:
         return whoami(info.context)
 
@@ -134,12 +172,31 @@ class SQuery:
 @strawberry.type
 class SMutation:
     @strawberry.mutation
+    def publish(self, topic: str, value: int) -> bool:
+        broker.publish(topic, value)
+        return True
+
+    @strawberry.mutation
+    def drain(self) -> bool:
+        broker.drain()
+        return True
+
+    @strawberry.mutation
+    def revoke(self, info: strawberry.Info) -> bool:
+        info.context.user.__class__.objects.filter(pk=info.context.user.pk).update(is_active=False)
+        return True
+
+    @strawberry.mutation
     def add_note(self, info: strawberry.Info, text: str) -> int:
         return add_note(info.context, text)
 
 
 @strawberry.type
 class SSubscription:
+    @strawberry.subscription(graphql_type=int)
+    def updates(self, info: strawberry.Info, topic: str):
+        return updates(info.context, topic)
+
     @strawberry.subscription(graphql_type=int)
     def ticks(self, info: strawberry.Info, steps: int = 3, fail: bool = False):
         if steps < 0:
@@ -179,6 +236,7 @@ def application(scope, receive, send):
         return django_server.application(scope, receive, send)
     finally:
         if scope["type"] == "lifespan":
+            assert not broker.subscribers
             client = sentry_sdk.get_client()
             client.close()
             # SDK close signals its session flusher but doesn't join it. Keep

@@ -24,6 +24,11 @@ from .adapter import BridgeClosedError
 from .threads import GrowingThreadExecutor
 
 
+class _SendFailure(Exception):
+    def __init__(self, error):
+        self.error = error
+
+
 @dataclass
 class _Operation:
     cancelled: Event = field(default_factory=Event)
@@ -121,7 +126,10 @@ class DjangoGraphQLWebSocket:
                 message = {"id": identifier, "type": kind}
                 if payload is not None:
                     message["payload"] = payload
-                frame(message)
+                try:
+                    frame(message)
+                except (OSError, BridgeClosedError) as error:
+                    raise _SendFailure(error) from error
                 if terminal:
                     operations.pop(identifier, None)
 
@@ -175,14 +183,17 @@ class DjangoGraphQLWebSocket:
                         # another source item; there is no result queue.
                         emit(identifier, operation, "data" if legacy else "next", formatted)
                 emit(identifier, operation, "complete", terminal=True)
-            except (OSError, BridgeClosedError):
-                raise
+            except _SendFailure as failure:
+                raise failure.error
             except Exception as error:
                 sdk = sys.modules.get("sentry_sdk")
                 if sdk is not None:
                     sdk.capture_exception(error)
                 formatted = error.formatted if isinstance(error, GraphQLError) else {"message": str(error)}
-                emit(identifier, operation, "error", [formatted], terminal=True)
+                try:
+                    emit(identifier, operation, "error", [formatted], terminal=True)
+                except _SendFailure as failure:
+                    raise failure.error
             finally:
                 try:
                     if source is not None and hasattr(source, "close"):

@@ -52,6 +52,56 @@ class GraphQLWebSocketTests(test_gunicorn.GunicornCommand, test_server.UvicornTe
         self.assertEqual(message["type"], kind)
         return message.get("payload")
 
+    def command(self, socket, query):
+        self.start(socket, "command", query)
+        result = self.result(socket, "command")
+        self.result(socket, "command", "complete")
+        return result
+
+    def test_broadcast_sources_cancel_and_recheck_authorization(self):
+        for library, user in (("graphene", "alice"), ("strawberry", "bob")):
+            browser = self.login(user)
+            with self.subTest(library=library), self.websocket(library, browser) as socket, self.websocket(library, browser) as control:
+                self.init(socket)
+                self.init(control)
+                self.start(socket, "live", 'subscription { updates(topic: "private") }')
+                self.wait_for(lambda: self.command(control, "{ subscribers }")["data"]["subscribers"] == 1)
+                self.command(control, 'mutation { publish(topic: "private", value: 7) }')
+                self.assertEqual(self.result(socket, "live"), {"data": {"updates": 7}})
+                socket.send(json.dumps({"type": "complete", "id": "live"}))
+                self.wait_for(lambda: self.command(control, "{ subscribers }")["data"]["subscribers"] == 0)
+                self.start(socket, "live", 'subscription { updates(topic: "private") }')
+                self.wait_for(lambda: self.command(control, "{ subscribers }")["data"]["subscribers"] == 1)
+                self.command(control, "mutation { revoke }")
+                self.command(control, 'mutation { publish(topic: "private", value: 8) }')
+                error = self.result(socket, "live", "error")
+                self.assertEqual(error[0]["message"], "subscription access revoked")
+                self.assertEqual(self.command(socket, "{ subscribers }")["data"]["subscribers"], 0)
+                self.assertEqual(self.command(control, "{ subscribers }")["data"]["subscribers"], 0)
+
+    def test_broadcast_drain_completes_waiting_operations(self):
+        browser = self.login()
+        with self.websocket("graphene", browser) as first, self.websocket("strawberry", browser) as second, self.websocket("graphene", browser) as control:
+            for socket in (first, second, control):
+                self.init(socket)
+            for socket in (first, second):
+                self.start(socket, "live", 'subscription { updates(topic: "one") }')
+            self.wait_for(lambda: self.command(control, "{ subscribers }")["data"]["subscribers"] == 2)
+            self.command(control, "mutation { drain }")
+            for socket in (first, second):
+                self.result(socket, "live", "complete")
+            self.assertEqual(self.command(control, "{ subscribers }")["data"]["subscribers"], 0)
+
+    def test_shutdown_wakes_idle_broadcast_sources(self):
+        browser = self.login()
+        with self.websocket("graphene", browser) as first, self.websocket("strawberry", browser) as second, self.websocket("graphene", browser) as control:
+            for socket in (first, second, control):
+                self.init(socket)
+            for socket in (first, second):
+                self.start(socket, "live", 'subscription { updates(topic: "one") }')
+            self.wait_for(lambda: self.command(control, "{ subscribers }")["data"]["subscribers"] == 2)
+            self.stop_server()
+
     def test_queries_mutations_variables_and_ordinary_subscription_iterators(self):
         browser = self.login()
         for library in ("graphene", "strawberry"):
