@@ -98,6 +98,11 @@ Graphene uses configured `GRAPHENE["MIDDLEWARE"]`, or an explicit `middleware=`
 list, for ordinary field execution. Strawberry retains its synchronous schema
 extension pipeline. Async sources/resolvers/extensions require translation;
 this experiment does not introduce an asyncio loop to run them.
+Graphene field middleware runs when resolving each event, but does not wrap
+the subscription source resolver. Put subscription authorization in the source
+resolver itself, and use `get_context` for operation-start context setup. Reset
+permission caches and recheck authorization during event delivery when those
+decisions must remain fresh throughout a long-lived subscription.
 
 ## Execution and cleanup
 
@@ -140,6 +145,10 @@ Initialize the SDK before constructing schemas, with its Django integration
 enabled, so the native worker supplies the outer ASGI transaction. Preserve
 Graphene integration or enable Strawberry's synchronous integration
 (`StrawberryIntegration(async_execution=False)` for tested SDK 2.38.0).
+That SDK's Graphene integration requires Graphene 3.3 or newer. Older Graphene
+versions can satisfy the transport's dependency range while leaving GraphQL
+instrumentation unavailable; check the SDK integration requirements separately
+when preserving an existing dependency lock.
 
 Operation threads inherit the connection trace but establish separate Sentry
 isolation/current scopes for user, tags, and breadcrumbs. Existing Graphene
@@ -166,6 +175,8 @@ Dependency versions exercised are Graphene 3.4.3, Graphene Django 3.2.3,
 graphql-core 3.2.13, Strawberry 0.327.7, Django 5.2, and Sentry SDK 2.38.0 on
 the native Gunicorn/Uvicorn worker. The Strawberry extra is deliberately narrow:
 this experiment uses its execution-context and view-error integration points.
+The 11 GraphQL checks also pass with Graphene 3.3, Graphene Django 3.2.2, and
+graphql-core 3.2.3, including Sentry's Graphene instrumentation.
 Gevent, Linux, throughput, third-party schema extensions, and exhaustive wire
 protocol conformance are not validated.
 
