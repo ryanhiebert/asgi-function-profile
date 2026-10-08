@@ -1,6 +1,7 @@
 """Both schema libraries over real native-worker WebSocket connections."""
 
 import importlib.util
+from contextlib import contextmanager
 import json
 from pathlib import Path
 import subprocess
@@ -42,6 +43,14 @@ class GraphQLWebSocketTests(test_gunicorn.GunicornCommand, test_server.UvicornTe
         socket.send(json.dumps({"type": "connection_init", "payload": {"label": label}}))
         self.assertEqual(json.loads(socket.recv(timeout=5)), {"type": "connection_ack"})
 
+    @contextmanager
+    def initialized_socket(self, library, browser, label="test"):
+        with self.websocket(library, browser) as socket:
+            # Initialize each connection before opening another. The fixture's
+            # short init deadline also applies while a second handshake runs.
+            self.init(socket, label)
+            yield socket
+
     def start(self, socket, identifier, query, *, protocol="graphql-transport-ws", **payload):
         socket.send(json.dumps({"type": "start" if protocol == "graphql-ws" else "subscribe",
                                 "id": identifier, "payload": {"query": query, **payload}}))
@@ -61,9 +70,7 @@ class GraphQLWebSocketTests(test_gunicorn.GunicornCommand, test_server.UvicornTe
     def test_broadcast_sources_cancel_and_recheck_authorization(self):
         for library, user in (("graphene", "alice"), ("strawberry", "bob")):
             browser = self.login(user)
-            with self.subTest(library=library), self.websocket(library, browser) as socket, self.websocket(library, browser) as control:
-                self.init(socket)
-                self.init(control)
+            with self.subTest(library=library), self.initialized_socket(library, browser) as socket, self.initialized_socket(library, browser) as control:
                 self.start(socket, "live", 'subscription { updates(topic: "private") }')
                 self.wait_for(lambda: self.command(control, "{ subscribers }")["data"]["subscribers"] == 1)
                 self.command(control, 'mutation { publish(topic: "private", value: 7) }')
@@ -81,9 +88,7 @@ class GraphQLWebSocketTests(test_gunicorn.GunicornCommand, test_server.UvicornTe
 
     def test_broadcast_drain_completes_waiting_operations(self):
         browser = self.login()
-        with self.websocket("graphene", browser) as first, self.websocket("strawberry", browser) as second, self.websocket("graphene", browser) as control:
-            for socket in (first, second, control):
-                self.init(socket)
+        with self.initialized_socket("graphene", browser) as first, self.initialized_socket("strawberry", browser) as second, self.initialized_socket("graphene", browser) as control:
             for socket in (first, second):
                 self.start(socket, "live", 'subscription { updates(topic: "one") }')
             self.wait_for(lambda: self.command(control, "{ subscribers }")["data"]["subscribers"] == 2)
@@ -94,9 +99,7 @@ class GraphQLWebSocketTests(test_gunicorn.GunicornCommand, test_server.UvicornTe
 
     def test_shutdown_wakes_idle_broadcast_sources(self):
         browser = self.login()
-        with self.websocket("graphene", browser) as first, self.websocket("strawberry", browser) as second, self.websocket("graphene", browser) as control:
-            for socket in (first, second, control):
-                self.init(socket)
+        with self.initialized_socket("graphene", browser) as first, self.initialized_socket("strawberry", browser) as second, self.initialized_socket("graphene", browser) as control:
             for socket in (first, second):
                 self.start(socket, "live", 'subscription { updates(topic: "one") }')
             self.wait_for(lambda: self.command(control, "{ subscribers }")["data"]["subscribers"] == 2)
@@ -164,9 +167,7 @@ class GraphQLWebSocketTests(test_gunicorn.GunicornCommand, test_server.UvicornTe
     def test_resolver_errors_are_results_and_sentry_keeps_operation_user(self):
         alice, bob = self.login("alice"), self.login("bob")
         for library in ("graphene", "strawberry"):
-            with self.websocket(library, alice) as first, self.websocket(library, bob) as second:
-                self.init(first, "alice")
-                self.init(second, "bob")
+            with self.initialized_socket(library, alice, "alice") as first, self.initialized_socket(library, bob, "bob") as second:
                 self.start(first, "a", "{ broken }")
                 self.start(second, "b", "subscription { ticks(fail: true) }")
                 result = self.result(first, "a")
@@ -231,9 +232,7 @@ class GraphQLWebSocketTests(test_gunicorn.GunicornCommand, test_server.UvicornTe
 
     def test_session_users_are_isolated_and_http_runs_alongside_sockets(self):
         alice, bob = self.login("alice"), self.login("bob")
-        with self.websocket("graphene", alice) as first, self.websocket("strawberry", bob) as second:
-            self.init(first, "alice")
-            self.init(second, "bob")
+        with self.initialized_socket("graphene", alice, "alice") as first, self.initialized_socket("strawberry", bob, "bob") as second:
             self.start(first, "a", "{ whoami }")
             self.start(second, "b", "{ whoami }")
             self.assertEqual(self.result(first, "a")["data"]["whoami"], "alice")
@@ -279,9 +278,8 @@ class GraphQLWebSocketTests(test_gunicorn.GunicornCommand, test_server.UvicornTe
 
     def test_shutdown_cancels_sources_and_joins_operation_threads(self):
         browser = self.login()
-        with self.websocket("graphene", browser) as first, self.websocket("strawberry", browser) as second:
+        with self.initialized_socket("graphene", browser) as first, self.initialized_socket("strawberry", browser) as second:
             for socket in (first, second):
-                self.init(socket)
                 self.start(socket, "long", "subscription { ticks(steps: 100000) }")
                 self.result(socket, "long")
             self.stop_server()

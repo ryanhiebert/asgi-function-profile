@@ -83,10 +83,13 @@ change without changing application code, the Django handler, or the adapter.
 The native-thread worker now reuses threads and grows on demand up to a high
 fail-fast ceiling, so idle sockets do not fill a small fixed pool needed by HTTP.
 The next validation direction is production-shaped Django compatibility and performance;
-no production application changes have been made. Explicit remaining questions
-include a first ASGI extension conformance example and the
+no production application changes have been made. Native
+[deployment experiments](docs/deployment-experiments.md) now cover Redis
+broadcasts, nginx idle/reconnect behavior, and a first ASGI extension example;
+a reproducible local Django performance probe compares WSGI, coroutine ASGI,
+and the function handler. Production load, additional ASGI extensions, and the
 compatibility of other database drivers and libraries with the execution
-backends. The adoption sequence in the design notes is a longer-term direction,
+backends remain open. The adoption sequence in the design notes is a longer-term direction,
 not an instruction to implement every candidate, publish, or contact upstream.
 Agree on the next experiment before expanding scope, and update this section
 as that direction changes.
@@ -99,8 +102,9 @@ remain separate work; neither existing async consumers nor async generators
 are run unchanged.
 A process-local [broadcast example](examples/broadcast.py) demonstrates bounded
 subscriber queues, cooperative cancellation/draining, and fresh authorization
-before event delivery through both schema integrations. Distributed delivery
-and proxy/client reconnect behavior remain unvalidated.
+before event delivery through both schema integrations. Optional Redis and nginx [experiments](docs/deployment-experiments.md)
+validate live cross-process delivery and local reconnect/shutdown behavior;
+Channels compatibility, replay, and production deployment remain unvalidated.
 The native worker and development runner restore Sentry's outer ASGI middleware
 when the application's initialized Django integration is enabled. Tested HTTP
 instrumentation and remaining limits are in the guide's
@@ -448,6 +452,10 @@ Integration tests start local HTTP/WebSocket servers and worker subprocesses;
 they need permission to bind loopback sockets. Inspect the test summary for
 skips when running in a different environment. The commands below are useful
 for narrower setups, but do not necessarily exercise every backend.
+Redis and nginx deployment tests additionally require an explicitly configured
+disposable Redis endpoint and local Docker image; see the
+[infrastructure test command](docs/deployment-experiments.md#reproducing-the-infrastructure-checks).
+Those suites report skips when the infrastructure variables are absent.
 
 The semantic suite covers blocking receive, send backpressure, exception
 propagation, HTTP streaming, WebSockets, lifespan, overlapping scopes, and

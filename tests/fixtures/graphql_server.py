@@ -4,6 +4,7 @@ import json
 import asyncio
 from collections.abc import AsyncIterator
 import threading
+import os
 
 import sentry_sdk
 from sentry_sdk.integrations.django import DjangoIntegration
@@ -39,6 +40,22 @@ from examples.broadcast import Broadcast
 
 STATE = django_server.STATE
 broker = Broadcast(capacity=2)
+if os.environ.get("ASGI_FUNCTION_BROADCAST") == "redis":
+    import redis
+    from redis.backoff import NoBackoff
+    from redis.retry import Retry
+    from examples.redis_broadcast import RedisBroadcast
+
+    redis_client = redis.Redis.from_url(
+        os.environ["ASGI_FUNCTION_REDIS_URL"], socket_connect_timeout=1,
+        socket_timeout=1, retry=Retry(NoBackoff(), 0),
+    )
+    broker = RedisBroadcast(redis_client, prefix="function-test:" + STATE.name)
+
+
+def subscriber_count():
+    with (broker.condition if isinstance(broker, Broadcast) else broker.lock):
+        return len(broker.subscribers)
 
 
 def updates(request, topic):
@@ -98,8 +115,7 @@ class GQuery(graphene.ObjectType):
     subscribers = graphene.Int()
 
     def resolve_subscribers(root, info):
-        with broker.condition:
-            return len(broker.subscribers)
+        return subscriber_count()
 
     def resolve_whoami(root, info):
         return whoami(info.context)
@@ -157,8 +173,7 @@ class GSubscription(graphene.ObjectType):
 class SQuery:
     @strawberry.field
     def subscribers(self) -> int:
-        with broker.condition:
-            return len(broker.subscribers)
+        return subscriber_count()
 
     @strawberry.field
     def whoami(self, info: strawberry.Info) -> str:
@@ -237,6 +252,8 @@ def application(scope, receive, send):
     finally:
         if scope["type"] == "lifespan":
             assert not broker.subscribers
+            if os.environ.get("ASGI_FUNCTION_BROADCAST") == "redis":
+                redis_client.close()
             client = sentry_sdk.get_client()
             client.close()
             # SDK close signals its session flusher but doesn't join it. Keep

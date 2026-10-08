@@ -235,3 +235,8 @@ Redis/channel-layer broadcast routing, application permission middleware,
 deployment drain groups, and custom chat/AI streaming consumers need separate
 translation in the application repository. An existing Channels `Subscription`
 class cannot be passed in unchanged merely because it uses Graphene.
+
+The [deployment experiments](deployment-experiments.md) add a native Redis
+source example, cross-process checks, real nginx forwarding/shutdown, and a
+combined authenticated GraphQL/Redis/proxy test. The Redis example is a new
+Pub/Sub source rather than a translation of Channels' naming/serialization.

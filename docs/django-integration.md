@@ -156,8 +156,12 @@ HTTP alongside open sockets, authentication, streaming and backpressure,
 SQLite transaction cleanup, shutdown, and two-process preload startup.
 Declared support is Python >=3.11 and Django >=5.2,<5.3, but this declaration
 is broader than the tested combinations. Linux deployment, PostgreSQL,
-production library compatibility, load capacity, and ASGI extension conformance
+production library compatibility, load capacity, and additional ASGI extensions
 need further validation. No throughput or latency improvement is claimed.
+The [deployment experiments](deployment-experiments.md) now cover native Redis
+sources, real nginx forwarding and worker replacement, a WebSocket denial
+extension, and a local synthetic Django performance probe. They are narrower
+evidence than production load or exhaustive extension conformance.
 
 A practical evaluation should compare unchanged representative views against
 an existing deployment with equal resource budgets. Check middleware and
