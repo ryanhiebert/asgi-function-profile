@@ -46,7 +46,8 @@ class UvicornTestCase(unittest.TestCase):
             start_new_session=(os.name == "posix"),
         )
         self.addCleanup(self.cleanup_server)
-        self.wait_for_file("lifespan-started")
+        # Fixture imports and fresh database migrations can be slow on a busy host.
+        self.wait_for_file("lifespan-started", timeout=30)
         self.wait_for_server()
 
     def server_command(self):

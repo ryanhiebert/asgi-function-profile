@@ -276,6 +276,28 @@ Field, group-name algorithm and MessagePack/Django serializer, so existing
 publishers can send the same broadcast and unsubscribe envelopes. It does not
 rewrite Redis or run an async consumer around application handlers.
 
+For Django-configured layers and standalone publishers, bind a provider instead:
+
+```python
+from asgi_function_profile.django_channels import DjangoChannelLayerProvider
+
+layers = DjangoChannelLayerProvider()
+schema = bind_subscriptions(schema, channel_layer_provider=layers)
+# Source creation uses layers.get(); lifespan/task-worker shutdown owns close().
+Updates.broadcast(group="example", payload=42)
+```
+
+The provider's `get()` owns a shared layer for sources. Its `publishing()` context
+borrows that layer, or closes a temporary layer when a standalone publisher
+finishes. Use `with layers.publishing():` around a batch to reuse its temporary
+backend. Binding accepts a layer or a provider, and rejects supplying both.
+Alternatively assign `Updates.channel_layer_provider` directly. Public ordinary
+`get_channel_layer()` and context-manager `publishing_layer()` hooks support custom
+ownership without overriding private methods. A custom provider needs `get()`
+and `publishing()`; its lifecycle remains the owner's responsibility. See the
+[Django provider guide](django-integration.md#native-channels-integration) for
+fork, configuration and cleanup limits.
+
 The original package's latest prerelease declares Django <5. The tested extra
 therefore uses the public
 [django-channels-graphql-ws-next 1.0.3](https://pypi.org/project/django-channels-graphql-ws-next/)
@@ -305,9 +327,11 @@ including subscription confirmations or suppression of notifications when
 Tests cover stable group identity, existing serialized envelopes, custom field
 names, cancellation/unsubscribe, access revocation, both WebSocket protocols,
 authenticated sources, Sentry publish-error attribution, idle-source shutdown,
-and an independent coroutine publisher through Redis. A consumer wrapping the
+configured provider ownership, concurrent standalone publishers, and independent
+coroutine and native publishers through Redis. A consumer wrapping the
 ordinary transport also demonstrates group-driven drain without a coroutine
-consumer round trip. See the
+consumer round trip, including cleanup after failed close sends followed by a
+real TCP disconnect. See the
 [native Channels guide](django-integration.md#native-channels-integration) for
 the multiplexer API, thread cost, lifecycle and remaining shutdown limits.
 

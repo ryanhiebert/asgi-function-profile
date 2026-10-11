@@ -141,6 +141,76 @@ class SubscriptionTests(unittest.TestCase):
         self.assertIs(raised.exception, failure)
         self.assertTrue(created[0].closed)
 
+    def test_public_layer_hook_and_provider_binding_preserve_source_and_publishers(self):
+        from asgi_function_profile.channels_graphene import bind_subscriptions
+        layer, Message, schema, previous, info, calls = self.source()
+        previous.close()
+        ownership = []
+        class Provider:
+            def get(self):
+                ownership.append("source")
+                return layer
+            @contextmanager
+            def publishing(self):
+                ownership.append("publisher")
+                yield layer
+        provider = Provider()
+        with self.assertRaises(TypeError):
+            bind_subscriptions(schema, channel_layer=layer, channel_layer_provider=provider)
+        bind_subscriptions(schema, channel_layer_provider=provider)
+        self.assertIsNone(Message.channel_layer)
+        self.assertIs(Message.channel_layer_provider, provider)
+        source = schema.graphql_schema.subscription_type.fields["customMessage"].subscribe(None, info, topic="one")
+        self.addCleanup(source.close)
+        self.assertIs(source.events.layer, layer)
+        Message.broadcast(group="one", payload="hello")
+        self.assertEqual(next(source), "hello")
+        Message.unsubscribe(group="one")
+        with self.assertRaises(StopIteration):
+            next(source)
+        self.assertEqual(ownership, ["source", "publisher", "publisher"])
+        bind_subscriptions(schema, channel_layer=layer)
+        self.assertIsNone(Message.channel_layer_provider)
+        self.assertIs(Message.get_channel_layer(), layer)
+
+    def test_custom_public_source_layer_hook_needs_no_private_override(self):
+        layer, Message, schema, previous, info, calls = self.source()
+        previous.close()
+        Message.channel_layer = None
+        with patch.object(Message, "get_channel_layer", return_value=layer):
+            source = schema.graphql_schema.subscription_type.fields["customMessage"].subscribe(None, info, topic="one")
+            self.addCleanup(source.close)
+            Message.broadcast(group="one", payload="custom")
+            self.assertEqual(next(source), "custom")
+            source.close()
+
+    def test_public_layer_hooks_reject_coroutines_and_custom_awaitables(self):
+        from inspect import iscoroutine
+        layer, Message, schema, previous, info, calls = self.source()
+        previous.close()
+        Message.channel_layer = None
+        async def asynchronous():
+            return layer
+        class Awaitable:
+            closed = False
+            def __await__(self):
+                yield
+            def close(self):
+                self.closed = True
+        source = schema.graphql_schema.subscription_type.fields["customMessage"].subscribe
+        for factory in (asynchronous, Awaitable):
+            for method in ("get_channel_layer", "publishing_layer"):
+                uses = [lambda: Message.broadcast(payload="test")]
+                if method == "get_channel_layer":
+                    uses.append(lambda: source(None, info, topic="one"))
+                for use in uses:
+                    with self.subTest(factory=factory, method=method, use=use):
+                        result = factory()
+                        with patch.object(Message, method, return_value=result):
+                            with self.assertRaisesRegex(TypeError, "ordinary functions"):
+                                use()
+                        self.assertTrue(result.cr_frame is None if iscoroutine(result) else result.closed)
+
 
 SERVER = AVAILABLE and all(importlib.util.find_spec(name) is not None for name in
                           ("uvicorn_worker", "websockets", "strawberry", "sentry_sdk"))
@@ -224,6 +294,27 @@ class ChannelsGrapheneServerTests(unittest.TestCase):
         self.assertEqual(failures[0]["user"]["username"], "bob")
         self.assertTrue((server.path / "channels-source-closed").exists())
 
+    def test_failed_close_then_tcp_disconnect_cleans_groups_and_joins_worker(self):
+        import socket as tcp
+        from deployment_support import wait
+        server = self.start(ASGI_FUNCTION_FAIL_CLOSE="1")
+        with self.socket(server) as socket:
+            self.operation(socket, "live", 'subscription { notice(topic:"one") { value } }')
+            wait(lambda: self.query(socket, '{ active(topic:"one") }')["active"] == 1)
+            self.operation(socket, "query", "mutation { drain }")
+            failed = server.path / "channels-close-failed"
+            wait(lambda: failed.exists() and failed.stat().st_size >= 2, alive=server.process)
+            finished = server.path / "channels-consumer-finished"
+            self.assertFalse(finished.exists())
+            socket.socket.shutdown(tcp.SHUT_RDWR)
+            socket.socket.close()
+            wait(finished.exists, alive=server.process)
+            self.assertEqual(json.loads(finished.read_text()), {})
+            self.assertEqual((server.path / "channels-source-closed").read_text(), "x")
+        output = server.stop()
+        self.assertNotIn("SIGKILL", output)
+        self.assertNotIn("WORKER TIMEOUT", output)
+
     @unittest.skipUnless(os.environ.get("ASGI_FUNCTION_REDIS_URL"), "requires disposable Redis")
     def test_legacy_and_native_publishers_reach_redis_source_and_exit(self):
         from deployment_support import wait
@@ -253,10 +344,12 @@ asyncio.run(main())
             self.assertEqual(self.message(socket, "live"), {"data": {"notice": {"value": 9}}})
             native_publisher = '''
 import sys
-from channels_redis.core import RedisChannelLayer
+from django.conf import settings
 from channels_graphql_ws.serializer import Serializer
-from asgi_function_profile.channels import FunctionChannelLayer
-with FunctionChannelLayer(lambda: RedisChannelLayer(hosts=[sys.argv[1]], prefix=sys.argv[2])) as layer:
+from asgi_function_profile.django_channels import DjangoChannelLayerProvider
+settings.configure(CHANNEL_LAYERS={"default": {"BACKEND":"channels_redis.core.RedisChannelLayer",
+                   "CONFIG":{"hosts":[sys.argv[1]], "prefix":sys.argv[2]}}})
+with DjangoChannelLayerProvider().publishing() as layer:
     layer.group_send(sys.argv[3], {"type":"broadcast", "group":sys.argv[3], "payload":Serializer.serialize(10)})
 '''
             result = subprocess.run([sys.executable, "-c", native_publisher, url,

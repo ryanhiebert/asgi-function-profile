@@ -1,17 +1,20 @@
 """Existing GraphQL transport composed with native consumers and channel sources."""
 
+import json
 import os
 import threading
 
 import graphene
 import graphql_server
-from channels.layers import InMemoryChannelLayer
 from django.db import connections
-from asgi_function_profile.channels import Consumer, FunctionChannelLayer
+from django.test import override_settings
+from asgi_function_profile.channels import Consumer
 from asgi_function_profile.channels_graphene import Subscription, bind_subscriptions
+from asgi_function_profile.django_channels import DjangoChannelLayerProvider
 from asgi_function_profile.graphene import GrapheneDjangoWebSocket
 
 layer, transport = None, None
+layers = DjangoChannelLayerProvider()
 
 
 class Notice(Subscription):
@@ -80,25 +83,40 @@ class Wrapper(Consumer):
 def application(scope, receive, send):
     global layer, transport
     if scope["type"] == "websocket" and scope["path"] == "/channels-graphene":
+        failed_close = bool(os.environ.get("ASGI_FUNCTION_FAIL_CLOSE"))
+        def socket_send(event):
+            if failed_close and event["type"] == "websocket.close":
+                with (graphql_server.STATE / "channels-close-failed").open("a") as marker:
+                    marker.write("x")
+                raise OSError("injected websocket close failure")
+            return send(event)
         try:
-            return Wrapper()(scope, receive, send)
+            return Wrapper()(scope, receive, socket_send)
         finally:
             assert all(connection.connection is None for connection in connections.all())
+            if failed_close:
+                async def remaining_groups():
+                    return layer.backend.groups
+                (graphql_server.STATE / "channels-consumer-finished").write_text(json.dumps(layer._call(remaining_groups)))
     def lifecycle_event():
         global layer, transport
         event = receive()
         if event["type"] == "lifespan.startup":
-            def factory():
-                if os.environ.get("ASGI_FUNCTION_REDIS_URL"):
-                    from channels_redis.core import RedisChannelLayer
-                    return RedisChannelLayer(hosts=[os.environ["ASGI_FUNCTION_REDIS_URL"]],
-                                             prefix=os.environ["ASGI_FUNCTION_CHANNEL_PREFIX"])
-                return InMemoryChannelLayer()
-            layer = FunctionChannelLayer(factory)
+            layer = layers.get()
             Wrapper.channel_layer = layer
-            schema = bind_subscriptions(graphene.Schema(query=Query, mutation=Mutation, subscription=Root), channel_layer=layer)
+            schema = bind_subscriptions(graphene.Schema(query=Query, mutation=Mutation, subscription=Root),
+                                        channel_layer_provider=layers)
             transport = GrapheneDjangoWebSocket(schema, **{**graphql_server.options, "connection_init_timeout": 5})
         elif event["type"] == "lifespan.shutdown":
-            layer.close()
+            layers.close()
         return event
-    return graphql_server.application(scope, lifecycle_event if scope["type"] == "lifespan" else receive, send)
+    if scope["type"] == "lifespan":
+        config = {"BACKEND": "channels.layers.InMemoryChannelLayer"}
+        if os.environ.get("ASGI_FUNCTION_REDIS_URL"):
+            config = {"BACKEND": "channels_redis.core.RedisChannelLayer", "CONFIG": {
+                "hosts": [os.environ["ASGI_FUNCTION_REDIS_URL"]],
+                "prefix": os.environ["ASGI_FUNCTION_CHANNEL_PREFIX"],
+            }}
+        with override_settings(CHANNEL_LAYERS={"default": config}):
+            return graphql_server.application(scope, lifecycle_event, send)
+    return graphql_server.application(scope, receive, send)

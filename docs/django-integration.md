@@ -221,6 +221,49 @@ non-daemon: an unclosed layer keeps a publisher process alive, and ordinary
 `atexit` callbacks run after Python waits for non-daemon threads. ASGI lifespan
 does not manage publishers in other processes.
 
+To reuse Django's `CHANNEL_LAYERS` configuration, the optional
+`asgi_function_profile.django_channels.DjangoChannelLayerProvider` supplies
+explicit shared and temporary ownership:
+
+```python
+from asgi_function_profile.django_channels import DjangoChannelLayerProvider
+
+layers = DjangoChannelLayerProvider()  # "default" alias; starts no threads.
+# During server/task-worker startup, after fork:
+layer = layers.get()
+# Assign this layer to consumers, then close it after they finish:
+# layers.close()
+```
+
+In a standalone command, without creating a shared layer:
+
+```python
+from asgi_function_profile.django_channels import DjangoChannelLayerProvider
+
+with DjangoChannelLayerProvider().publishing() as publisher:
+    publisher.group_send("updates", {"type": "room.update", "value": "ready"})
+```
+
+`get()` lazily creates and reuses a shared layer for the configured alias.
+`publishing()` borrows an existing shared layer, or creates and closes a
+temporary layer on context exit. Nested publishing contexts reuse the temporary
+layer, so a batch can avoid starting a backend for every send. Concurrent
+standalone callers own separate temporary layers; no subscription class binding
+changes during a send. Another alias can use another provider instance.
+
+An owner must call `close()` after shared consumers and publishers finish;
+closing while they run is unsupported. This closes all cached layers and permits
+a later `get()` to create a fresh one. Replacing a `CHANNEL_LAYERS` entry retains
+separate layers until cleanup; do not mutate configuration entries in place.
+Fork resets the provider's cache and locks without touching the parent's
+backends. Construction is safe before fork, but create shared layers after fork.
+Copied contexts reuse temporary layers only while open and in their owning
+process; a later call creates a fresh layer if needed.
+Forking inside a publishing context and unwinding that inherited context in the
+child is unsupported: inherited layer references cannot be used or closed there.
+There is no automatic exit hook. The provider constructs its own backend on its
+own loop; it does not reuse Channels' cached coroutine layer.
+
 Socket and channel handlers run on the invocation thread, including Django ORM
 work, context variables and Sentry attribution. The handshake is delivered
 before channel events. Each input source has at most one unhandled event, with
@@ -260,7 +303,10 @@ is joined, rather than hidden behind a daemon or a timed join. An ordinary
 receive has no portable cancellation capability: closing a real Uvicorn
 socket releases it via disconnect, and cancellation of the outer adapter also
 releases it. A close send that fails without a disconnect can leave cleanup
-waiting until that outer cancellation; a regression test records this boundary.
+waiting until that outer cancellation; a synthetic regression test records this
+boundary. A real TCP test verifies that a peer disconnect after both close sends
+fail still releases the reader, removes consumer and subscription groups, and
+joins application threads before Gunicorn's worker-exit hook.
 Long-running handlers must also cooperate with shutdown. Gunicorn's graceful
 timeout remains the fallback for uncooperative work. No change to the profile
 or adapter contract is introduced by this integration.

@@ -5,6 +5,7 @@ Async hooks still require translation. Configure the function channel layer
 after fork, before publishing or constructing sources.
 """
 
+from contextlib import contextmanager
 from functools import partial
 
 from channels_graphql_ws import Subscription as ChannelsSubscription
@@ -80,35 +81,57 @@ class _Source:
 class Subscription(ChannelsSubscription):
     """Keep ordinary subscribe/publish/unsubscribed hooks and publisher calls.
 
-    Set channel_layer to a FunctionChannelLayer, or pass it to bind_subscriptions.
+    Set channel_layer to a FunctionChannelLayer, or supply a channel_layer_provider
+    with get() and publishing() methods. bind_subscriptions accepts either form.
     Local notification overflow terminates the source instead of dropping older
     notifications. This intentionally differs from the upstream queue policy.
     """
 
     channel_layer = None
+    channel_layer_provider = None
 
     class Meta:
         abstract = True
 
     @classmethod
+    def get_channel_layer(cls):
+        """Return the source's shared layer; override for custom ownership."""
+        if cls.channel_layer is not None:
+            return cls.channel_layer
+        if cls.channel_layer_provider is not None:
+            return _ordinary(cls.channel_layer_provider.get)
+        raise RuntimeError("configure a function channel layer before using subscriptions")
+
+    @classmethod
     def _function_layer(cls):
-        if cls.channel_layer is None:
-            raise RuntimeError("configure a function channel layer before using subscriptions")
-        return cls.channel_layer
+        # Retain existing overrides while exposing an ordinary public hook.
+        return _ordinary(cls.get_channel_layer)
+
+    @classmethod
+    @contextmanager
+    def publishing_layer(cls):
+        """Borrow a shared layer or scope a temporary publisher's ownership."""
+        if cls.channel_layer is not None or cls.channel_layer_provider is None:
+            yield cls._function_layer()
+        else:
+            with _ordinary(cls.channel_layer_provider.publishing) as layer:
+                yield layer
 
     @classmethod
     def broadcast(cls, *, group=None, payload=None):
         name = cls._group_name(group)
-        cls._function_layer().group_send(name, {
-            "type": "broadcast", "group": name, "payload": Serializer.serialize(payload),
-        })
+        with _ordinary(cls.publishing_layer) as layer:
+            layer.group_send(name, {
+                "type": "broadcast", "group": name, "payload": Serializer.serialize(payload),
+            })
 
     broadcast_sync = broadcast
 
     @classmethod
     def unsubscribe(cls, *, group=None):
         name = cls._group_name(group)
-        cls._function_layer().group_send(name, {"type": "unsubscribe", "group": name})
+        with _ordinary(cls.publishing_layer) as layer:
+            layer.group_send(name, {"type": "unsubscribe", "group": name})
 
     unsubscribe_sync = unsubscribe
 
@@ -120,13 +143,15 @@ class Subscription(ChannelsSubscription):
         return field
 
 
-def bind_subscriptions(schema, *, channel_layer=None):
+def bind_subscriptions(schema, *, channel_layer=None, channel_layer_provider=None):
     """Bind source factories to Fields, preserving Graphene's compiled names.
 
-    An optional layer configures publishers and sources for each subscription
-    class. A class has one layer binding per process; do not bind it to different
-    layers in different schemas. Otherwise configure class.channel_layer yourself.
+    A layer or provider configures each subscription class. A class has one
+    binding per process; do not bind it differently in different schemas.
+    Otherwise configure class.channel_layer or class.channel_layer_provider.
     """
+    if channel_layer is not None and channel_layer_provider is not None:
+        raise TypeError("choose a channel layer or a provider, not both")
     if schema.subscription is None:
         return schema
     compiled = schema.graphql_schema.subscription_type.fields.values()
@@ -136,6 +161,10 @@ def bind_subscriptions(schema, *, channel_layer=None):
             continue
         if channel_layer is not None:
             subscription.channel_layer = channel_layer
+            subscription.channel_layer_provider = None
+        elif channel_layer_provider is not None:
+            subscription.channel_layer = None
+            subscription.channel_layer_provider = channel_layer_provider
         for target in compiled:
             if target.resolve is field.resolver:
                 def source(root, info, _subscription=subscription, **arguments):

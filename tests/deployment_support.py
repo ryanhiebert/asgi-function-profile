@@ -27,7 +27,8 @@ class NativeServer:
         ], env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
            text=True, start_new_session=True)
         try:
-            wait(lambda: (self.path / "lifespan-started").exists(), alive=self.process)
+            # Allow fixture imports/migrations more time than protocol assertions.
+            wait(lambda: (self.path / "lifespan-started").exists(), alive=self.process, timeout=30)
             wait(lambda: accepts(self.port), alive=self.process)
         except BaseException as error:
             try:

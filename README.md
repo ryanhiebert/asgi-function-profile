@@ -106,6 +106,11 @@ shutdown; earlier local probes cover 128 sockets. Each layered consumer still
 uses one additional socket-reader thread. Deterministic tests
 cover both receive completion orders and completion during a running handler;
 buffered events may remain unhandled when the connection ends.
+An optional Django-configured layer provider supplies lazy shared ownership and
+context-managed standalone publishers, with explicit lifecycle cleanup and fork
+reset. Graphene exposes public layer ownership hooks. A real TCP regression
+verifies group cleanup and worker joins after failed close sends followed by a
+peer disconnect; cleanup without disconnect still needs outer cancellation.
 The [Django guide](docs/django-integration.md#native-channels-integration) describes
 the optional APIs and remaining shutdown limits. A separate optional
 [Channels Graphene module](src/asgi_function_profile/channels_graphene.py) preserves
