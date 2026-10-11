@@ -169,3 +169,82 @@ request-context isolation, database cleanup, streaming, proxy behavior, and
 shutdown before measuring throughput, tail latency, CPU, memory, native
 threads, and database connections. Define acceptable performance from the
 application's service requirements rather than assuming a universal threshold.
+
+## Native Channels integration
+
+Install the optional `channels` extra for ordinary consumers and event iterators.
+This is a translated subset, not full Channels compatibility. It keeps existing
+backends, including `channels_redis.core.RedisChannelLayer`, behind one owned
+asyncio loop per `FunctionChannelLayer`. Create the layer after fork, during
+lifespan startup, and close it after connections and sources finish:
+
+```python
+from channels_redis.core import RedisChannelLayer
+from asgi_function_profile.channels import FunctionChannelLayer, JsonWebsocketConsumer
+
+# In lifespan startup; obtain redis_url from your deployment configuration.
+layer = FunctionChannelLayer(lambda: RedisChannelLayer(hosts=[redis_url]))
+
+class Room(JsonWebsocketConsumer):
+    channel_layer = layer
+    groups = ("updates",)
+
+    def receive_json(self, content):
+        self.channel_layer.group_send("updates", {"type": "room.update", "value": content})
+
+    def room_update(self, event):
+        self.send_json(event["value"])
+
+websocket_application = Room.as_asgi()
+# In lifespan shutdown, after consumers finish: layer.close()
+```
+
+Backend construction and operations stay on that layer's loop. Do not pass a
+backend previously used by another loop or inherited after fork. The ordinary
+facade is separate from Channels' async `get_channel_layer()` interface.
+Scopes and wire messages are unchanged; external Channels publishers can use
+the same Redis namespace and groups.
+
+Socket and channel handlers run on the invocation thread, including Django ORM
+work, context variables and Sentry attribution. The handshake is delivered
+before channel events. Each input source has at most one unhandled event, with
+a shared inbox that retains completion order. A busy channel source cannot
+continually jump ahead of queued socket input. Groups in `groups`, or joined
+through `join_group()`, are renewed at half the backend's `group_expiry` and
+discarded on cleanup. `leave_group()` is serialized with renewal so departed
+memberships are not re-added. Direct `layer.group_add()` calls remain the
+application's responsibility.
+
+An ordinary transport can reuse the multiplexer by subclassing `Consumer` and
+overriding `run(self, receive)` to call `transport(self.scope, receive, self.send)`.
+Use `join_group()` there to receive deployment drain events. Transport socket
+handling stays ordinary; channel events invoke the consumer's named handlers.
+Transport operation threads may send concurrently: the consumer serializes
+actual sends and propagates their errors.
+
+`ChannelEvents(groups, channel_layer=layer, limit=1024)` offers an ordinary
+iterator without a consumer. It renews groups and buffers at most `limit`
+notifications. Its thread-safe, nonblocking `cancel()` wakes a waiting `next()`;
+the owning thread then calls `close()` to discard memberships. It uses backend
+futures without adding a native reader thread. Overflow terminates the iterator
+with `ChannelEventOverflow`, discarding pending events explicitly rather than
+silently evicting a control notification. Backend and renewal errors wake the
+iterator with their original exceptions. This is live, at-most-once delivery;
+backend capacity drops, expiry, disconnect and cancellation still preclude a
+lossless or replay guarantee.
+
+The tests exercise race ordering, bounded read-ahead, group renewal and removal,
+overflow, cancellation, original failure propagation, delegated async-hook
+rejection, authenticated ORM work, Sentry attribution, unchanged Redis
+publishers and cooperative Gunicorn shutdown. Cleanup errors propagate when
+there is no active application failure; otherwise the original failure wins.
+
+Each layered consumer retains one additional native socket-reader thread. It
+is joined, rather than hidden behind a daemon or a timed join. An ordinary
+receive has no portable cancellation capability: closing a real Uvicorn
+socket releases it via disconnect, and cancellation of the outer adapter also
+releases it. A close send that fails without a disconnect can leave cleanup
+waiting until that outer cancellation; a regression test records this boundary.
+Long-running handlers must also cooperate with shutdown. Gunicorn's graceful
+timeout remains the fallback for uncooperative work. No change to the profile
+or adapter contract is introduced by this integration.

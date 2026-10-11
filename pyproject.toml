@@ -16,6 +16,8 @@ django = ["Django>=5.2,<5.3"]
 graphene = ["Django>=5.2,<5.3", "graphene-django>=3.2,<4", "graphql-core>=3.2,<3.3"]
 strawberry = ["Django>=5.2,<5.3", "strawberry-graphql>=0.327,<0.328", "graphql-core>=3.2,<3.3"]
 gunicorn = ["gunicorn>=23", "uvicorn-worker>=0.3", "uvicorn>=0.30"]
+channels = ["channels>=4.3,<5", "channels-redis>=4.3,<5"]
+channels-graphene = ["Django>=5.2,<5.3", "graphene-django>=3.2,<4", "graphql-core>=3.2,<3.3", "channels>=4.3,<5", "django-channels-graphql-ws-next==1.0.3"]
 gevent = ["gevent>=25.9.1", "gunicorn>=23", "uvicorn-worker>=0.3", "uvicorn>=0.30"]
 
 [dependency-groups]

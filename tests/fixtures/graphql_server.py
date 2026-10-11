@@ -230,13 +230,21 @@ def authenticated(request, parameters):
 
 
 options = {"allowed_origins": {"http://127.0.0.1:8000"}, "get_context": context,
-           "on_connect": authenticated, "connection_init_timeout": 0.5}
+           "on_connect": authenticated, "connection_init_timeout": 5}
 applications = {
     "/graphene": GrapheneDjangoWebSocket(graphene.Schema(query=GQuery, mutation=GMutation,
                                                        subscription=GSubscription), **options),
     "/strawberry": StrawberryDjangoWebSocket(strawberry.Schema(query=SQuery, mutation=SMutation,
                                                              subscription=SSubscription), **options),
 }
+# Keep the short deadline isolated from tests doing real authentication, ORM
+# and SDK work: scheduling delay must not turn those into timeout tests.
+applications["/graphene-init-timeout"] = GrapheneDjangoWebSocket(
+    applications["/graphene"].schema, **{**options, "connection_init_timeout": 0.5},
+)
+applications["/strawberry-init-timeout"] = StrawberryDjangoWebSocket(
+    applications["/strawberry"].schema, **{**options, "connection_init_timeout": 0.5},
+)
 
 
 def application(scope, receive, send):

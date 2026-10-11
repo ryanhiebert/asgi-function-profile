@@ -29,8 +29,11 @@ class NativeServer:
         try:
             wait(lambda: (self.path / "lifespan-started").exists(), alive=self.process)
             wait(lambda: accepts(self.port), alive=self.process)
-        except BaseException:
-            self.close()
+        except BaseException as error:
+            try:
+                self.close()
+            except Exception as failure:
+                error.add_note(f"Server cleanup also failed: {failure!r}")
             raise
 
     def stop(self):
@@ -51,7 +54,10 @@ class NativeServer:
                 try:
                     self.stop()
                 except BaseException:
-                    os.killpg(self.process.pid, signal.SIGKILL)
+                    try:
+                        os.killpg(self.process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass  # The process may exit between stop() and killpg().
                     self.process.communicate()
                     raise
             else:

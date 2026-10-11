@@ -143,8 +143,9 @@ publishes; it does not itself close sockets or announce a reconnect code.
 Each Gunicorn process has its own broker. Cross-process or cross-container
 broadcasts need an external broker with equivalent cancellation, bounded
 buffering, and cleanup. Calling an async channel layer through a new event loop
-per receive is not demonstrated here. No Redis or Channels compatibility is
-claimed by this experiment.
+per receive is not used by these examples. The optional native Channels
+integration below instead owns one backend loop for ordinary consumers and
+subscription event iterators.
 
 ### Threads and resources
 
@@ -229,12 +230,86 @@ graphql-core 3.2.3, including Sentry's Graphene instrumentation.
 Gevent, Linux, throughput, third-party schema extensions, and exhaustive wire
 protocol conformance are not validated.
 
-This implementation supplies **schema execution and WebSocket transport**, not
-a message broker. Channels-style subscription classes, group membership,
-Redis/channel-layer broadcast routing, application permission middleware,
-deployment drain groups, and custom chat/AI streaming consumers need separate
-translation in the application repository. An existing Channels `Subscription`
-class cannot be passed in unchanged merely because it uses Graphene.
+This implementation supplies **schema execution and WebSocket transport**.
+Application permission middleware and custom chat/AI streaming consumers still
+need translation. Existing async hooks and generators cannot run unchanged.
+
+### Channels-style Graphene subscriptions
+
+The optional `channels-graphene` extra adds
+`asgi_function_profile.channels_graphene.Subscription` and `bind_subscriptions`.
+Replace the subscription base class while keeping ordinary `subscribe`,
+`publish`, `unsubscribed`, `Field`, `broadcast` and `unsubscribe` calls:
+
+```python
+from asgi_function_profile.channels_graphene import Subscription, bind_subscriptions
+
+class Updates(Subscription):
+    value = graphene.Int()
+
+    class Arguments:
+        topic = graphene.String(required=True)
+
+    def subscribe(root, info, topic):
+        # Check authorization before joining.
+        return [topic]
+
+    def publish(payload, info, topic):
+        return Updates(value=payload)
+
+class SubscriptionRoot(graphene.ObjectType):
+    updates = Updates.Field()
+
+# After constructing the function layer during lifespan startup:
+schema = bind_subscriptions(
+    graphene.Schema(query=Query, subscription=SubscriptionRoot), channel_layer=layer,
+)
+transport = GrapheneDjangoWebSocket(schema, allowed_origins=allowed_origins)
+Updates.broadcast(group="example", payload=42)
+```
+
+Binding configures one function layer per subscription class and process; do
+not bind the same class to different layers in different schemas. Alternatively
+assign `Updates.channel_layer` yourself. Keep class module/name identity stable
+to retain existing group names. The integration reuses the public package's
+Field, group-name algorithm and MessagePack/Django serializer, so existing
+publishers can send the same broadcast and unsubscribe envelopes. It does not
+rewrite Redis or run an async consumer around application handlers.
+
+The original package's latest prerelease declares Django <5. The tested extra
+therefore uses the public
+[django-channels-graphql-ws-next 1.0.3](https://pypi.org/project/django-channels-graphql-ws-next/)
+fork, which supports Django 5.2 and pins graphql-core 3.2.6. These dependencies
+are optional; ordinary Graphene sources do not need them. The compatibility
+module also uses the fork's internal `_meta` hook metadata and `_group_name`
+helper. The exact pin bounds that dependency; upgrades require rerunning the
+hook, schema-binding and wire-identity checks. Compatibility with
+other forks or private vendored modifications requires separate checks.
+
+The source uses renewable, cancellable `ChannelEvents`. An optional ordinary
+`check_access(root, info, **arguments)` hook runs before deserializing each
+broadcast; it must refresh authorization rather than reuse stale permissions.
+This does not proactively revoke idle sources. Database cleanup occurs after
+subscription setup, event access/deserialization, and unsubscribe cleanup.
+Source creation, hooks and cleanup stay on the operation thread, preserving
+the transport's existing Sentry scope and execution instrumentation.
+
+`notification_queue_limit` sets the local buffer size, defaulting to 1024.
+Overflow ends the operation with an error instead of dropping old messages;
+this differs deliberately from the upstream queue policy and prevents silent
+local eviction of unsubscribe messages. Backend delivery remains at most once.
+The translated subset does not claim the original consumer's full behavior,
+including subscription confirmations or suppression of notifications when
+`publish` returns `None`. Async hooks require translation.
+
+Tests cover stable group identity, existing serialized envelopes, custom field
+names, cancellation/unsubscribe, access revocation, both WebSocket protocols,
+authenticated sources, Sentry publish-error attribution, idle-source shutdown,
+and an independent coroutine publisher through Redis. A consumer wrapping the
+ordinary transport also demonstrates group-driven drain without a coroutine
+consumer round trip. See the
+[native Channels guide](django-integration.md#native-channels-integration) for
+the multiplexer API, thread cost, lifecycle and remaining shutdown limits.
 
 The [deployment experiments](deployment-experiments.md) add a native Redis
 source example, cross-process checks, real nginx forwarding/shutdown, and a

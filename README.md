@@ -94,6 +94,24 @@ not an instruction to implement every candidate, publish, or contact upstream.
 Agree on the next experiment before expanding scope, and update this section
 as that direction changes.
 
+An independent native [Channels experiment](src/asgi_function_profile/channels.py)
+explores ordinary consumers with existing channel-layer backend interoperability.
+Both socket and group handlers run on the scope thread, with bounded read-ahead
+and unchanged channel backends. Memberships joined through the consumer are
+renewed until cleanup. A cancellable `ChannelEvents` iterator reuses the same
+backend boundary; local overflow ends the stream instead of silently discarding
+control events. Consumers can wrap an ordinary transport through `run(receive)`.
+Tests cover authenticated ORM work, Sentry error attribution and graceful
+shutdown; earlier local probes cover 128 sockets. Each layered consumer still
+uses one additional socket-reader thread. Deterministic tests
+cover both receive completion orders and completion during a running handler;
+buffered events may remain unhandled when the connection ends.
+The [Django guide](docs/django-integration.md#native-channels-integration) describes
+the optional APIs and remaining shutdown limits. A separate optional
+[Channels Graphene module](src/asgi_function_profile/channels_graphene.py) preserves
+ordinary subscription hooks, publisher calls, group identity and serialized
+envelopes using a public dependency, without changing channel backends.
+
 For Django evaluation, use the [integration guide](docs/django-integration.md).
 Optional native-thread [GraphQL WebSocket integrations](docs/graphql-websockets.md)
 run Graphene Django and Strawberry Django schemas with ordinary subscription
@@ -104,7 +122,7 @@ A process-local [broadcast example](examples/broadcast.py) demonstrates bounded
 subscriber queues, cooperative cancellation/draining, and fresh authorization
 before event delivery through both schema integrations. Optional Redis and nginx [experiments](docs/deployment-experiments.md)
 validate live cross-process delivery and local reconnect/shutdown behavior;
-Channels compatibility, replay, and production deployment remain unvalidated.
+Full Channels compatibility, replay, and production deployment remain unvalidated.
 The native worker and development runner restore Sentry's outer ASGI middleware
 when the application's initialized Django integration is enabled. Tested HTTP
 instrumentation and remaining limits are in the guide's

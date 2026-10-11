@@ -46,8 +46,7 @@ class GraphQLWebSocketTests(test_gunicorn.GunicornCommand, test_server.UvicornTe
     @contextmanager
     def initialized_socket(self, library, browser, label="test"):
         with self.websocket(library, browser) as socket:
-            # Initialize each connection before opening another. The fixture's
-            # short init deadline also applies while a second handshake runs.
+            # Initialize each connection before opening another handshake.
             self.init(socket, label)
             yield socket
 
@@ -256,7 +255,7 @@ class GraphQLWebSocketTests(test_gunicorn.GunicornCommand, test_server.UvicornTe
                     with self.assertRaises(ConnectionClosed) as error:
                         socket.recv(timeout=5)
                     self.assertEqual(error.exception.rcvd.code, expected)
-            with self.websocket(library, browser) as socket:
+            with self.websocket(library + "-init-timeout", browser) as socket:
                 with self.assertRaises(ConnectionClosed) as error:
                     socket.recv(timeout=5)
                 self.assertEqual(error.exception.rcvd.code, 4408)
