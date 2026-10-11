@@ -225,7 +225,7 @@ class ChannelsGrapheneServerTests(unittest.TestCase):
         self.assertTrue((server.path / "channels-source-closed").exists())
 
     @unittest.skipUnless(os.environ.get("ASGI_FUNCTION_REDIS_URL"), "requires disposable Redis")
-    def test_legacy_publisher_reaches_native_redis_source(self):
+    def test_legacy_and_native_publishers_reach_redis_source_and_exit(self):
         from deployment_support import wait
         from uuid import uuid4
         url = os.environ["ASGI_FUNCTION_REDIS_URL"]
@@ -251,4 +251,17 @@ asyncio.run(main())
                                     capture_output=True, text=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(self.message(socket, "live"), {"data": {"notice": {"value": 9}}})
+            native_publisher = '''
+import sys
+from channels_redis.core import RedisChannelLayer
+from channels_graphql_ws.serializer import Serializer
+from asgi_function_profile.channels import FunctionChannelLayer
+with FunctionChannelLayer(lambda: RedisChannelLayer(hosts=[sys.argv[1]], prefix=sys.argv[2])) as layer:
+    layer.group_send(sys.argv[3], {"type":"broadcast", "group":sys.argv[3], "payload":Serializer.serialize(10)})
+'''
+            result = subprocess.run([sys.executable, "-c", native_publisher, url,
+                                     self.query(socket, "{ prefix }")["prefix"], group],
+                                    capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.message(socket, "live"), {"data": {"notice": {"value": 10}}})
             server.stop()

@@ -205,6 +205,22 @@ facade is separate from Channels' async `get_channel_layer()` interface.
 Scopes and wire messages are unchanged; external Channels publishers can use
 the same Redis namespace and groups.
 
+Publishers outside an ASGI server still need an owner for the layer. A
+short-lived command can close it explicitly through its context manager:
+
+```python
+with FunctionChannelLayer(lambda: RedisChannelLayer(hosts=[redis_url])) as layer:
+    layer.group_send("updates", {"type": "room.update", "value": "ready"})
+```
+
+For Channels-style Graphene publishers, bind the subscription class's
+`channel_layer` to this layer before calling its ordinary `broadcast()` method.
+Long-lived task workers can reuse a layer created after fork, provided their
+worker lifecycle closes it before process exit. The backend thread is
+non-daemon: an unclosed layer keeps a publisher process alive, and ordinary
+`atexit` callbacks run after Python waits for non-daemon threads. ASGI lifespan
+does not manage publishers in other processes.
+
 Socket and channel handlers run on the invocation thread, including Django ORM
 work, context variables and Sentry attribution. The handshake is delivered
 before channel events. Each input source has at most one unhandled event, with

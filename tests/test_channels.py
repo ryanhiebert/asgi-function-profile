@@ -81,6 +81,25 @@ class ChannelLayerTests(unittest.TestCase):
         self.assertFalse(reader.is_alive())
         self.assertIsInstance(outcome.get(timeout=1), BaseException)
 
+    def test_context_manager_preserves_publisher_error_and_reports_cleanup_failure(self):
+        from channels.layers import InMemoryChannelLayer
+        from asgi_function_profile.channels import FunctionChannelLayer
+        operation_error = ValueError("publisher failed")
+        cleanup_error = OSError("backend close failed")
+        class Backend(InMemoryChannelLayer):
+            async def close_pools(self):
+                raise cleanup_error
+        for failed_operation in (False, True):
+            with self.subTest(failed_operation=failed_operation):
+                expected = operation_error if failed_operation else cleanup_error
+                with self.assertRaises(type(expected)) as raised:
+                    with FunctionChannelLayer(Backend) as layer:
+                        if failed_operation:
+                            raise operation_error
+                self.assertIs(raised.exception, expected)
+                self.assertFalse(layer.thread.is_alive())
+                self.assertTrue(layer.loop.is_closed())
+
 
 @unittest.skipUnless(AVAILABLE, "requires channels extra")
 class ConsumerTests(unittest.TestCase):

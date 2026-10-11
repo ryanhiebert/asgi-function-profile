@@ -196,7 +196,7 @@ class FunctionChannelLayer:
         return self
 
     def __exit__(self, *args):
-        self.close()
+        _cleanup(self.close)
 
 
 class _Groups:
