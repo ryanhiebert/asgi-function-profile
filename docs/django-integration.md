@@ -256,6 +256,8 @@ backend previously used by another loop or inherited after fork. The ordinary
 facade is separate from Channels' async `get_channel_layer()` interface.
 Scopes and wire messages are unchanged; external Channels publishers can use
 the same Redis namespace and groups.
+Shutdown tests cover cancelling receives already waiting on the backend and
+receives submitted before its loop can start them, then joining the loop thread.
 
 Publishers outside an ASGI server still need an owner for the layer. A
 short-lived command can close it explicitly through its context manager:

@@ -279,6 +279,25 @@ class ResolverInstrumentationTests(unittest.TestCase):
                 copied[0].run(SentryResolverMiddleware().resolve, broken, None, SimpleNamespace(field_name="broken"))
         self.assertEqual(sum("exception" in event for event in events), 1)
 
+    def test_copied_context_starts_fresh_capture_scopes_for_repeated_execution(self):
+        from contextvars import copy_context
+        import sentry_sdk
+        from graphql import ExecutionResult, GraphQLError
+        from asgi_function_profile.graphene_sentry import instrument_execution
+        result = ExecutionResult(errors=[GraphQLError("same error object")])
+        copied = []
+        def execute():
+            copied.append(copy_context())
+            return result
+        client, events = self.client(False)
+        with sentry_sdk.isolation_scope() as scope:
+            scope.set_client(client)
+            self.assertIs(instrument_execution(execute)(), result)
+            deferred = instrument_execution(lambda: result)
+            for _ in range(2):
+                self.assertIs(copied[0].run(deferred), result)
+        self.assertEqual(sum("exception" in event for event in events), 3)
+
     def test_none_boundary_delegates_resolvers_and_restores_fallback_after_return(self):
         import graphene
         import sentry_sdk

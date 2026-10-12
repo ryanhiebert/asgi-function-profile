@@ -1,5 +1,6 @@
 """Optional ordinary Graphene spans and execution-result error capture."""
 
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from functools import wraps
 from inspect import isasyncgen, isawaitable
@@ -15,6 +16,23 @@ class _ExecutionReports:
     def __init__(self):
         self.active = True
         self.decisions = {}
+
+
+@contextmanager
+def _execution_scope():
+    reports = _execution_reports.get()
+    if reports is not None and reports.active:
+        yield reports
+        return
+    reports = _ExecutionReports()
+    token = _execution_reports.set(reports)
+    try:
+        yield reports
+    finally:
+        # Copies of this context must also stop delegating after execution ends.
+        reports.active = False
+        reports.decisions.clear()
+        _execution_reports.reset(token)
 
 
 def _validate_policy(policy):
@@ -49,34 +67,22 @@ def instrument_execution(execute, *, error_capture="fallback", capture_error=Non
 
     @wraps(execute)
     def instrumented(*args, **kwargs):
-        reports = _execution_reports.get()
-        owns_scope = reports is None or not reports.active
-        if owns_scope:
-            reports = _ExecutionReports()
-        token = _execution_reports.set(reports)
-        try:
+        with _execution_scope() as reports:
             result = _ordinary(execute(*args, **kwargs))
-            try:
+            # Reporting failures never replace the execution result; one failed
+            # report must not prevent attempts for the remaining errors.
+            with suppress(Exception):
                 client = sentry_sdk.get_client()
                 if _owns_capture(error_capture, client):
                     for error in result.errors or ():
-                        try:
+                        with suppress(Exception):
                             key = (id(client), id(error))
                             if key in reports.decisions:
                                 continue
                             reports.decisions[key] = (client, error)  # Retain identities during nested calls.
                             if capture_error is None or _ordinary(capture_error(error)):
                                 sentry_sdk.capture_exception(error)
-                        except Exception:
-                            pass  # Continue reporting other result errors.
-            except Exception:
-                pass  # Reporting must not replace or modify the execution result.
             return result
-        finally:
-            if owns_scope:
-                reports.active = False
-                reports.decisions.clear()
-            _execution_reports.reset(token)
 
     return instrumented
 
@@ -99,11 +105,9 @@ class SentryResolverMiddleware:
             try:
                 return _ordinary(next_resolver(root, info, **kwargs))
             except Exception:
-                try:
+                with suppress(Exception):
                     reports = _execution_reports.get()
                     delegated = self.error_capture == "fallback" and reports is not None and reports.active
                     if not delegated and _owns_capture(self.error_capture, sentry_sdk.get_client()):
                         sentry_sdk.capture_exception()
-                except Exception:
-                    pass  # Instrumentation must not replace the resolver failure.
                 raise

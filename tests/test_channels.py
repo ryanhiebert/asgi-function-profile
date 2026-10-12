@@ -81,6 +81,38 @@ class ChannelLayerTests(unittest.TestCase):
         self.assertFalse(reader.is_alive())
         self.assertIsInstance(outcome.get(timeout=1), BaseException)
 
+    def test_close_cancels_receives_submitted_before_the_loop_can_start_them(self):
+        from unittest.mock import patch
+        layer = self.layer()
+        channels = [layer.new_channel() for _ in range(3)]
+        entered, release = Event(), Event()
+
+        def pause_loop():
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("test did not release backend loop")
+
+        layer.loop.call_soon_threadsafe(pause_loop)
+        try:
+            self.assertTrue(entered.wait(2))
+            futures = [layer._receive_future(channel) for channel in channels]
+            self.assertTrue(all(not future.done() for future in futures))
+            schedule = layer.loop.call_soon_threadsafe
+
+            def resume_on_close(callback, *args, **kwargs):
+                handle = schedule(callback, *args, **kwargs)
+                if layer.closed:
+                    release.set()  # Resume only after shutdown has been scheduled.
+                return handle
+
+            with patch.object(layer.loop, "call_soon_threadsafe", side_effect=resume_on_close):
+                layer.close()
+            self.assertTrue(all(future.cancelled() for future in futures))
+            self.assertTrue(layer.loop.is_closed())
+            self.assertFalse(layer.thread.is_alive())
+        finally:
+            release.set()
+
     def test_context_manager_preserves_publisher_error_and_reports_cleanup_failure(self):
         from channels.layers import InMemoryChannelLayer
         from asgi_function_profile.channels import FunctionChannelLayer

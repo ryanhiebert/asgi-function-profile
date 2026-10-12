@@ -314,7 +314,9 @@ http_view = ObservedGraphQLView.as_view(
 
 Tests cover resolver/serialization/validation errors, expected-error filtering,
 nested decisions, scope reset after success/failure, concurrent clients, source
-composition and unchanged results. The experimental extra pins SDK 2.38.0;
+composition and unchanged results. Repeated execution from a copied context
+after its original call finishes starts fresh capture ownership, even when the
+same error object is returned again. The experimental extra pins SDK 2.38.0;
 upgrades need these checks repeated.
 
 ## Evidence and boundaries

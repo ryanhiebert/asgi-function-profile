@@ -70,7 +70,6 @@ class FunctionChannelLayer:
         self.loop = asyncio.new_event_loop()
         self.lock = Lock()
         self.closed = False
-        self.pending = set()
         self.thread = Thread(target=self._serve, name="function-channel-layer")
         self.thread.start()
         try:
@@ -111,16 +110,10 @@ class FunctionChannelLayer:
                     raise _BackendError(error) from error
             wrapper = run()
             try:
-                future = asyncio.run_coroutine_threadsafe(wrapper, self.loop)
+                return asyncio.run_coroutine_threadsafe(wrapper, self.loop)
             except BaseException:
                 wrapper.close()
                 raise
-            self.pending.add(future)
-        def completed(future):
-            with self.lock:
-                self.pending.discard(future)
-        future.add_done_callback(completed)
-        return future
 
     def _call(self, operation, *, cancelled=None):
         future = self._submit(operation)
@@ -174,10 +167,9 @@ class FunctionChannelLayer:
             if self.closed:
                 return
             self.closed = True
-            pending = tuple(self.pending)
-        for future in pending:
-            future.cancel()
         # Cancel receives and close backend connections before stopping its loop.
+        # Submission shares the close lock: every accepted task is scheduled
+        # before cleanup, so the loop owns cancellation without a future registry.
         async def cleanup():
             tasks = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
             for task in tasks:
@@ -440,8 +432,7 @@ class Consumer:
             future.add_done_callback(channel_received)
             return future
 
-        context = None
-        reader = Thread(target=lambda: context.run(socket_events), name="function-consumer-socket")
+        reader = None
         pending = None
         close_code = 1000
         first = True
@@ -455,13 +446,14 @@ class Consumer:
                     inbox.put_nowait(("error", error))
 
         def next_event():
-            nonlocal first, pending, delivered_socket, context
+            nonlocal first, pending, delivered_socket, reader
             if first:
                 first = False
                 # The transport sees its handshake before any layer events.
                 return receive()
-            if reader.ident is None:
-                context = contextvars.copy_context()
+            if reader is None:
+                reader = Thread(target=contextvars.copy_context().run, args=(socket_events,),
+                                name="function-consumer-socket")
                 reader.start()
                 pending = channel_receive()
                 if self._membership.renewal is not None:
@@ -498,7 +490,7 @@ class Consumer:
                     # WebSocket releases its reader via the server's disconnect.
                     _cleanup(lambda: Consumer.send(self, {"type": "websocket.close", "code": close_code}))
             finally:
-                if reader.ident is not None:
+                if reader is not None and reader.ident is not None:
                     reader.join()
 
     def dispatch(self, message):
