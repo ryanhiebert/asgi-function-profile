@@ -1,9 +1,84 @@
-"""Optional ordinary Graphene resolver spans with SDK-aware error fallback."""
+"""Optional ordinary Graphene spans and execution-result error capture."""
 
+from contextvars import ContextVar
+from functools import wraps
 from inspect import isasyncgen, isawaitable
 
 import sentry_sdk
 from sentry_sdk.integrations.graphene import GrapheneIntegration
+
+
+_execution_reports = ContextVar("sentry_graphql_execution_reports", default=None)
+
+
+class _ExecutionReports:
+    def __init__(self):
+        self.active = True
+        self.decisions = {}
+
+
+def _validate_policy(policy):
+    if policy not in ("fallback", "always", "none"):
+        raise ValueError("error_capture must be 'fallback', 'always' or 'none'")
+
+
+def _ordinary(result):
+    if isawaitable(result) or isasyncgen(result):
+        if hasattr(result, "close"):
+            result.close()
+        raise TypeError("function-profile GraphQL hooks must be ordinary functions")
+    return result
+
+
+def _owns_capture(policy, client):
+    return policy == "always" or (
+        policy == "fallback" and client.get_integration(GrapheneIntegration) is None
+    )
+
+
+def instrument_execution(execute, *, error_capture="fallback", capture_error=None):
+    """Wrap ordinary GraphQL execution; return its original ExecutionResult.
+
+    Capture result errors, including serialization/validation, under the same
+    policy as field middleware. capture_error(error) filters helper-owned errors;
+    enabled SDK capture retains its own filtering. Nested wrappers share report
+    decisions per client/error object, scoped to this execution. Unhandled
+    exceptions escape to the caller's existing exception boundary.
+    """
+    _validate_policy(error_capture)
+
+    @wraps(execute)
+    def instrumented(*args, **kwargs):
+        reports = _execution_reports.get()
+        owns_scope = reports is None or not reports.active
+        if owns_scope:
+            reports = _ExecutionReports()
+        token = _execution_reports.set(reports)
+        try:
+            result = _ordinary(execute(*args, **kwargs))
+            try:
+                client = sentry_sdk.get_client()
+                if _owns_capture(error_capture, client):
+                    for error in result.errors or ():
+                        try:
+                            key = (id(client), id(error))
+                            if key in reports.decisions:
+                                continue
+                            reports.decisions[key] = (client, error)  # Retain identities during nested calls.
+                            if capture_error is None or _ordinary(capture_error(error)):
+                                sentry_sdk.capture_exception(error)
+                        except Exception:
+                            pass  # Continue reporting other result errors.
+            except Exception:
+                pass  # Reporting must not replace or modify the execution result.
+            return result
+        finally:
+            if owns_scope:
+                reports.active = False
+                reports.decisions.clear()
+            _execution_reports.reset(token)
+
+    return instrumented
 
 
 class SentryResolverMiddleware:
@@ -16,25 +91,18 @@ class SentryResolverMiddleware:
     """
 
     def __init__(self, *, error_capture="fallback"):
-        if error_capture not in ("fallback", "always", "none"):
-            raise ValueError("error_capture must be 'fallback', 'always' or 'none'")
+        _validate_policy(error_capture)
         self.error_capture = error_capture
 
     def resolve(self, next_resolver, root, info, **kwargs):
         with sentry_sdk.start_span(op="graphql.resolve", name=info.field_name):
             try:
-                result = next_resolver(root, info, **kwargs)
-                if isawaitable(result) or isasyncgen(result):
-                    if hasattr(result, "close"):
-                        result.close()
-                    raise TypeError("function-profile resolvers must be ordinary functions")
-                return result
+                return _ordinary(next_resolver(root, info, **kwargs))
             except Exception:
                 try:
-                    if self.error_capture == "always" or (
-                        self.error_capture == "fallback"
-                        and sentry_sdk.get_client().get_integration(GrapheneIntegration) is None
-                    ):
+                    reports = _execution_reports.get()
+                    delegated = self.error_capture == "fallback" and reports is not None and reports.active
+                    if not delegated and _owns_capture(self.error_capture, sentry_sdk.get_client()):
                         sentry_sdk.capture_exception()
                 except Exception:
                     pass  # Instrumentation must not replace the resolver failure.

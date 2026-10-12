@@ -22,18 +22,20 @@ class LocalTransport(Transport):
 
 
 transport_lock = threading.Lock()
+integrations = [DjangoIntegration(), StrawberryIntegration(async_execution=False)]
+if os.environ.get("ASGI_FUNCTION_GRAPHENE_SENTRY") != "disabled":
+    integrations.append(GrapheneIntegration())
 sentry_sdk.init(
     dsn="http://public@localhost/1", transport=LocalTransport(), traces_sample_rate=1,
     enable_backpressure_handling=False,
-    send_default_pii=True, integrations=[DjangoIntegration(), GrapheneIntegration(),
-                                      StrawberryIntegration(async_execution=False)],
+    send_default_pii=True, integrations=integrations, auto_enabling_integrations=False,
 )
 
 import django_server
 from django.db import connections, transaction
 from examples.django_demo.models import PrivateNote
 from asgi_function_profile.graphene import GrapheneDjangoWebSocket
-from asgi_function_profile.graphene_sentry import SentryResolverMiddleware
+from asgi_function_profile.graphene_sentry import SentryResolverMiddleware, instrument_execution
 from asgi_function_profile.django_auth import refresh_authentication
 from asgi_function_profile.strawberry import StrawberryDjangoWebSocket
 import graphene
@@ -114,6 +116,7 @@ def ticks(request, steps, fail=False):
 class GQuery(graphene.ObjectType):
     whoami = graphene.String(required=True)
     broken = graphene.String()
+    invalid = graphene.Int()
     subscribers = graphene.Int()
 
     def resolve_subscribers(root, info):
@@ -124,6 +127,10 @@ class GQuery(graphene.ObjectType):
 
     def resolve_broken(root, info):
         raise ValueError("resolver failed")
+
+    def resolve_invalid(root, info):
+        whoami(info.context)
+        return "not an integer"
 
 
 class AddNote(graphene.Mutation):
@@ -233,10 +240,11 @@ def authenticated(request, parameters):
 
 options = {"allowed_origins": {"http://127.0.0.1:8000"}, "get_context": context,
            "on_connect": authenticated, "connection_init_timeout": 5}
+graphene_schema = graphene.Schema(query=GQuery, mutation=GMutation, subscription=GSubscription)
 applications = {
-    "/graphene": GrapheneDjangoWebSocket(graphene.Schema(query=GQuery, mutation=GMutation,
-                                                       subscription=GSubscription),
-                                       middleware=[SentryResolverMiddleware()], **options),
+    "/graphene": GrapheneDjangoWebSocket(graphene_schema,
+                                       middleware=[SentryResolverMiddleware()],
+                                       execution=instrument_execution(graphene_schema.execute), **options),
     "/strawberry": StrawberryDjangoWebSocket(strawberry.Schema(query=SQuery, mutation=SMutation,
                                                              subscription=SSubscription), **options),
 }

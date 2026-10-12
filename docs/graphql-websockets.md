@@ -250,7 +250,72 @@ capture fails. It supplies `graphql.resolve` spans, not operation transactions
 or a new request/user lifecycle. Tests cover enabled, disabled and unsupported
 SDK integration, direct execution, spans-only behavior, different active clients, original
 exceptions, and the real GraphQL transport's attribution and event counts.
-The experimental extra pins SDK 2.38.0; upgrades need these checks repeated.
+Resolver middleware observes resolver invocation, so a returned value that
+fails field serialization is outside its error-capture boundary. To include
+field completion, parsing and validation errors, wrap execution itself:
+
+```python
+from asgi_function_profile.graphene_sentry import instrument_execution
+
+execute = instrument_execution(
+    schema.execute,
+    capture_error=lambda error: error.extensions.get("code") != "EXPECTED",
+)
+socket_application = GrapheneDjangoWebSocket(
+    schema, allowed_origins=allowed_origins,
+    middleware=[permission_middleware, SentryResolverMiddleware()],
+    execution=execute,
+)
+```
+
+The transport's optional `execution=` callable receives the ordinary
+`schema.execute()` arguments, including its instantiated middleware and
+subscription execution context. It leaves the shared schema untouched and
+does not import Sentry. Any execution decorator can use this hook.
+
+`instrument_execution()` returns the original result without changing data,
+errors or serialization. Its `capture_error(error)` predicate receives the
+actual `GraphQLError`, with `original_error`, `path` and `extensions`, so expected
+errors can be excluded without parsing their messages. That predicate filters
+only helper-owned capture; enabled SDK capture still uses its own `before_send`
+policy. The helper never initializes the SDK or changes that policy.
+
+The same `fallback`, `always` and `none` modes apply at this boundary. Default
+resolver fallback delegates to an active execution wrapper, so resolver and
+completion errors are reported at the result boundary instead of being reported
+twice. `none` disables helper capture throughout that call, including default
+resolver fallback; enabled SDK result capture remains independent. An explicit
+resolver `always` mode still owns manual capture, so use default resolver
+fallback or spans-only middleware with an execution wrapper.
+
+Nested wrappers share the first helper-owned decision for each client/error
+object, including a predicate rejection: an outer wrapper does not override an
+inner exclusion. Decisions expire after the enclosing execution returns;
+independent calls, concurrent client scopes and deferred copied contexts retain
+their normal capture behavior. Exceptions escaping execution are not captured
+here; they propagate to the caller's existing exception boundary, including
+the transport's handler. Reporting failures preserve the result and do not
+prevent attempts to report its other errors.
+
+For direct graphql-core execution, choose `always` because that path bypasses
+SDK Graphene result capture. An HTTP view can wrap its execution method through
+normal subclassing, while keeping its field middleware spans-only:
+
+```python
+class ObservedGraphQLView(GraphQLView):
+    execute_graphql_request = instrument_execution(
+        GraphQLView.execute_graphql_request, error_capture="always",
+    )
+
+http_view = ObservedGraphQLView.as_view(
+    schema=schema, middleware=[SentryResolverMiddleware(error_capture="none")],
+)
+```
+
+Tests cover resolver/serialization/validation errors, expected-error filtering,
+nested decisions, scope reset after success/failure, concurrent clients, source
+composition and unchanged results. The experimental extra pins SDK 2.38.0;
+upgrades need these checks repeated.
 
 ## Evidence and boundaries
 

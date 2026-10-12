@@ -126,6 +126,9 @@ refuses pending changes, and reports when authentication changes require HTTP
 login or cookie renewal. Optional Graphene resolver spans use SDK error capture
 when enabled and provide explicit fallback capture otherwise. Application
 permission, attribution and revocation policy remain in hooks.
+An execution wrapper extends that observability to GraphQL result errors, with
+call-scoped capture ownership and a predicate for expected errors. The Graphene
+transport accepts an injected execution callable without changing its schema.
 The [Django guide](docs/django-integration.md#native-channels-integration) describes
 the optional APIs and remaining shutdown limits. A separate optional
 [Channels Graphene module](src/asgi_function_profile/channels_graphene.py) preserves
