@@ -85,6 +85,20 @@ class GraphQLWebSocketTests(test_gunicorn.GunicornCommand, test_server.UvicornTe
                 self.assertEqual(self.command(socket, "{ subscribers }")["data"]["subscribers"], 0)
                 self.assertEqual(self.command(control, "{ subscribers }")["data"]["subscribers"], 0)
 
+    def test_session_refresh_stops_delivery_after_http_logout(self):
+        for library, user, other in (("graphene", "alice", "bob"), ("strawberry", "bob", "alice")):
+            with self.subTest(library=library):
+                browser, controller = self.login(user), self.login(other)
+                with self.initialized_socket(library, browser) as socket, self.initialized_socket(library, controller) as control:
+                    self.start(socket, "live", 'subscription { updates(topic: "private") }')
+                    self.wait_for(lambda: self.command(control, "{ subscribers }")["data"]["subscribers"] == 1)
+                    with browser.post("/logout/") as response:
+                        response.read()
+                    self.command(control, 'mutation { publish(topic: "private", value: 9) }')
+                    errors = self.result(socket, "live", "error")
+                    self.assertEqual(errors[0]["message"], "subscription access revoked")
+                    self.wait_for(lambda: self.command(control, "{ subscribers }")["data"]["subscribers"] == 0)
+
     def test_broadcast_drain_completes_waiting_operations(self):
         browser = self.login()
         with self.initialized_socket("graphene", browser) as first, self.initialized_socket("strawberry", browser) as second, self.initialized_socket("graphene", browser) as control:

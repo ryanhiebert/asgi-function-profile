@@ -33,6 +33,8 @@ import django_server
 from django.db import connections, transaction
 from examples.django_demo.models import PrivateNote
 from asgi_function_profile.graphene import GrapheneDjangoWebSocket
+from asgi_function_profile.graphene_sentry import SentryResolverMiddleware
+from asgi_function_profile.django_auth import refresh_authentication
 from asgi_function_profile.strawberry import StrawberryDjangoWebSocket
 import graphene
 import strawberry
@@ -60,9 +62,9 @@ def subscriber_count():
 
 def updates(request, topic):
     whoami(request)
-    return broker.subscribe(topic, authorized=lambda: request.user.__class__.objects.filter(
-        pk=request.user.pk, is_active=True,
-    ).exists())
+    def authorized():
+        return not refresh_authentication(request).http_login_required
+    return broker.subscribe(topic, authorized=authorized)
 
 
 def context(request, params, cancelled):
@@ -233,7 +235,8 @@ options = {"allowed_origins": {"http://127.0.0.1:8000"}, "get_context": context,
            "on_connect": authenticated, "connection_init_timeout": 5}
 applications = {
     "/graphene": GrapheneDjangoWebSocket(graphene.Schema(query=GQuery, mutation=GMutation,
-                                                       subscription=GSubscription), **options),
+                                                       subscription=GSubscription),
+                                       middleware=[SentryResolverMiddleware()], **options),
     "/strawberry": StrawberryDjangoWebSocket(strawberry.Schema(query=SQuery, mutation=SMutation,
                                                              subscription=SSubscription), **options),
 }

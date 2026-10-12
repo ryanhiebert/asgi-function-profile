@@ -181,6 +181,8 @@ and per-event authorization remain application choices. A request/user is
 created once per GraphQL operation, so long-lived operations need explicit
 session freshness, permission-cache invalidation, and revocation policies.
 HTTP middleware and `ATOMIC_REQUESTS` do not automatically apply to sockets.
+The [Django authentication refresh helper](django-integration.md#refreshing-long-lived-authentication)
+provides session reloading and explicit outcomes without deciding permission policy.
 
 ## Sentry
 
@@ -201,6 +203,54 @@ execution alone. Unexpected iterator exceptions are captured separately.
 `get_context` can set Sentry user data according to the application's privacy
 policy. The socket's outer transaction lasts for the connection; profiling and
 per-operation transaction design are not validated.
+
+The optional `graphene-sentry` extra supplies ordinary Graphene field spans:
+
+```python
+from asgi_function_profile.graphene_sentry import SentryResolverMiddleware
+
+socket_application = GrapheneDjangoWebSocket(
+    schema, allowed_origins=allowed_origins,
+    middleware=[permission_middleware, SentryResolverMiddleware()],
+)
+```
+
+This uses Graphene's normal resolver middleware API and can also be passed to
+`schema.execute(..., middleware=[...])` outside WebSockets. It neither initializes
+the SDK nor enables integrations. Configure attribution in `get_context` or
+surrounding middleware; permission/cache resets remain application hooks.
+
+`error_capture="fallback"` is the default. At each resolver invocation, the
+helper uses the active SDK client: if `GrapheneIntegration` is enabled, it leaves
+result-error capture to that integration; otherwise it captures resolver failures
+itself. Installed but unsupported/disabled integrations do not disable fallback.
+Use `error_capture="none"` for spans only; SDK capture, when enabled,
+continues independently. Avoid stacking this with other manual resolver-error
+capture, which can create separate raw-exception and GraphQL-error events.
+
+Fallback assumes execution through Graphene's `schema.execute()` boundary,
+where the SDK integration wraps result processing. Graphene-Django's HTTP view
+and direct graphql-core execution bypass that boundary; use
+`SentryResolverMiddleware(error_capture="always")` to capture their resolver
+errors even when the SDK integration is enabled. Choose this only when SDK
+result-error capture is bypassed, to avoid duplicate events. For the HTTP view,
+pass an instance explicitly:
+
+```python
+from graphene_django.views import GraphQLView
+
+http_view = GraphQLView.as_view(
+    schema=schema, middleware=[SentryResolverMiddleware(error_capture="always")],
+)
+```
+
+Source creation, iterator and transport failures remain outside field middleware. The helper
+rejects async resolver results and preserves resolver exceptions if fallback
+capture fails. It supplies `graphql.resolve` spans, not operation transactions
+or a new request/user lifecycle. Tests cover enabled, disabled and unsupported
+SDK integration, direct execution, spans-only behavior, different active clients, original
+exceptions, and the real GraphQL transport's attribution and event counts.
+The experimental extra pins SDK 2.38.0; upgrades need these checks repeated.
 
 ## Evidence and boundaries
 

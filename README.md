@@ -121,6 +121,11 @@ context-managed standalone publishers, with explicit lifecycle cleanup and fork
 reset. Graphene exposes public layer ownership hooks. A real TCP regression
 verifies group cleanup and worker joins after failed close sends followed by a
 peer disconnect; cleanup without disconnect still needs outer cancellation.
+An optional Django authentication helper reloads long-lived operation sessions,
+refuses pending changes, and reports when authentication changes require HTTP
+login or cookie renewal. Optional Graphene resolver spans use SDK error capture
+when enabled and provide explicit fallback capture otherwise. Application
+permission, attribution and revocation policy remain in hooks.
 The [Django guide](docs/django-integration.md#native-channels-integration) describes
 the optional APIs and remaining shutdown limits. A separate optional
 [Channels Graphene module](src/asgi_function_profile/channels_graphene.py) preserves

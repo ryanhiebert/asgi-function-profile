@@ -170,6 +170,58 @@ shutdown before measuring throughput, tail latency, CPU, memory, native
 threads, and database connections. Define acceptable performance from the
 application's service requirements rather than assuming a universal threshold.
 
+## Refreshing long-lived authentication
+
+The optional Django helper reloads a request's existing session backend and key,
+then obtains its user through `django.contrib.auth.get_user()`:
+
+```python
+from asgi_function_profile.django_auth import PendingSessionChanges, refresh_authentication
+
+def authorized(request):
+    try:
+        refreshed = refresh_authentication(request)
+    except PendingSessionChanges:
+        return False  # Application policy: resolve the pending data over HTTP.
+    if refreshed.http_login_required:
+        return False
+    return permitted(refreshed.user)  # Your permission check/cache policy.
+```
+
+`PendingSessionChanges` is raised before changing the request if its current
+session is already modified. Pending data and original session/user references
+remain intact. Resolve those changes deliberately before another refresh; the
+helper does not save them or overwrite them with backend data.
+
+On success, `AuthenticationRefresh.user` is also assigned to `request.user` and
+Django 5.2's cached sync/async authentication accessors. `session_changed` reports
+changes during reloading/authentication: mutations, key rotation or flushing.
+It does not report changes to user fields or permission state. A fresh user can
+remain authenticated while its session changed.
+
+`http_login_required` means authentication is absent, or the refreshed session
+changed and an HTTP login/cookie-renewal flow is needed before continuing with
+that authenticated session. It is a caller-visible stopping condition, not a
+redirect or an attempt to set cookies on an established WebSocket. The helper
+does not save a response cookie. Application code decides whether anonymous
+access is allowed, when to refresh, how to update its context, and which pending
+work to stop. Permission caches and Sentry attribution need their own updates.
+
+Session/authentication errors propagate; the original request references remain
+unchanged if authentication fails. Authentication can itself change backend
+state, and those backend effects are not rolled back. Freshness follows the
+configured backends: server-side session removal is detected on a later reload;
+signed-cookie logout cannot invalidate a previously issued cookie. This is not
+push revocation or a guarantee against changes occurring after the refresh.
+Custom backends may cache users or handle backend errors themselves.
+
+The tests exercise real cache and signed-cookie stores, expired/deleted sessions,
+password changes, secret fallback rotation, request preservation, cached-user
+coherence, and a real database-session HTTP logout followed by a GraphQL event.
+The helper performs synchronous backend I/O on its caller's thread. It does not
+initialize Django, own request lifetime, or close database connections; bound
+those operations and close them before waiting again, as in the socket examples.
+
 ## Native Channels integration
 
 Install the optional `channels` extra for ordinary consumers and event iterators.

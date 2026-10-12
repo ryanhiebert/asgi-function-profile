@@ -215,6 +215,10 @@ graphene = [
     { name = "graphene-django" },
     { name = "graphql-core" },
 ]
+graphene-sentry = [
+    { name = "graphene" },
+    { name = "sentry-sdk" },
+]
 gunicorn = [
     { name = "gunicorn" },
     { name = "uvicorn" },
@@ -248,6 +252,7 @@ requires-dist = [
     { name = "django", marker = "extra == 'strawberry'", specifier = ">=5.2,<5.3" },
     { name = "django-channels-graphql-ws-next", marker = "extra == 'channels-graphene'", specifier = "==1.0.3" },
     { name = "gevent", marker = "extra == 'gevent'", specifier = ">=25.9.1" },
+    { name = "graphene", marker = "extra == 'graphene-sentry'", specifier = ">=3.2,<4" },
     { name = "graphene-django", marker = "extra == 'channels-graphene'", specifier = ">=3.2,<4" },
     { name = "graphene-django", marker = "extra == 'graphene'", specifier = ">=3.2,<4" },
     { name = "graphql-core", marker = "extra == 'channels-graphene'", specifier = ">=3.2,<3.3" },
@@ -255,6 +260,7 @@ requires-dist = [
     { name = "graphql-core", marker = "extra == 'strawberry'", specifier = ">=3.2,<3.3" },
     { name = "gunicorn", marker = "extra == 'gevent'", specifier = ">=23" },
     { name = "gunicorn", marker = "extra == 'gunicorn'", specifier = ">=23" },
+    { name = "sentry-sdk", marker = "extra == 'graphene-sentry'", specifier = "==2.38.0" },
     { name = "strawberry-graphql", marker = "extra == 'strawberry'", specifier = ">=0.327,<0.328" },
     { name = "uvicorn", marker = "extra == 'gevent'", specifier = ">=0.30" },
     { name = "uvicorn", marker = "extra == 'gunicorn'", specifier = ">=0.30" },
@@ -262,7 +268,7 @@ requires-dist = [
     { name = "uvicorn-worker", marker = "extra == 'gevent'", specifier = ">=0.3" },
     { name = "uvicorn-worker", marker = "extra == 'gunicorn'", specifier = ">=0.3" },
 ]
-provides-extras = ["server", "django", "graphene", "strawberry", "gunicorn", "channels", "channels-graphene", "gevent"]
+provides-extras = ["server", "django", "graphene", "graphene-sentry", "strawberry", "gunicorn", "channels", "channels-graphene", "gevent"]
 
 [package.metadata.requires-dev]
 test = [
