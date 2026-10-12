@@ -274,12 +274,32 @@ discarded on cleanup. `leave_group()` is serialized with renewal so departed
 memberships are not re-added. Direct `layer.group_add()` calls remain the
 application's responsibility.
 
-An ordinary transport can reuse the multiplexer by subclassing `Consumer` and
-overriding `run(self, receive)` to call `transport(self.scope, receive, self.send)`.
-Use `join_group()` there to receive deployment drain events. Transport socket
-handling stays ordinary; channel events invoke the consumer's named handlers.
-Transport operation threads may send concurrently: the consumer serializes
-actual sends and propagates their errors.
+`TransportConsumer` wraps an ordinary WebSocket transport with the same
+multiplexer. It obtains a borrowed layer from a provider on invocation, joins
+its configured groups, and calls `transport(scope, receive, send)`. Layer cleanup
+remains the provider owner's responsibility. For example, given an ordinary
+transport and the provider above:
+
+```python
+from asgi_function_profile.channels import TransportConsumer
+
+class ManagedSocket(TransportConsumer):
+    def deployment_drain(self, event):
+        self.send({"type": "websocket.close", "code": 1001})
+
+websocket_application = ManagedSocket.as_asgi(
+    transport=transport, channel_layer_provider=layers, groups=("deployment-events",),
+)
+```
+
+The group name, event type (`deployment.drain` here) and close code are
+application policy. `groups` may also be a class attribute, as on
+`WebsocketConsumer`. Subclasses can override `run(receive)` and call
+`join_group()` for groups chosen from `self.scope`, then delegate to
+`super().run(receive)`. Transport socket handling stays ordinary; named channel
+handlers run on the invocation thread. Transport operation threads may send
+concurrently: the consumer serializes actual sends and propagates their errors.
+The lower-level `Consumer.run(receive)` composition hook remains available.
 
 `ChannelEvents(groups, channel_layer=layer, limit=1024)` offers an ordinary
 iterator without a consumer. It renews groups and buffers at most `limit`

@@ -103,6 +103,93 @@ class ChannelLayerTests(unittest.TestCase):
 
 @unittest.skipUnless(AVAILABLE, "requires channels extra")
 class ConsumerTests(unittest.TestCase):
+    def test_transport_provider_is_lazy_borrowed_and_preserves_context(self):
+        from channels.layers import InMemoryChannelLayer
+        from asgi_function_profile.channels import FunctionChannelLayer, TransportConsumer
+        tag = contextvars.ContextVar("transport-tag", default="missing")
+        with FunctionChannelLayer(InMemoryChannelLayer) as layer:
+            for options in ({}, {"groups": ["override"]}):
+                with self.subTest(options=options):
+                    group = "override" if options else "room"
+                    incoming, sent, failures = Queue(), Queue(), Queue()
+                    lookups, handlers = [], []
+                    scope = {"type": "websocket"}
+                    class Provider:
+                        def get(self):
+                            lookups.append(get_ident())
+                            return layer
+                    class Wrapped(TransportConsumer):
+                        groups = ("room",)
+                        def notice(self, event):
+                            handlers.append(get_ident())
+                            tag.set("channel-event")
+                            self.send({"type": "websocket.send", "text": event["value"]})
+                    def transport(actual_scope, receive, send):
+                        self.assertIs(actual_scope, scope)
+                        self.assertEqual(tag.get(), "connection")
+                        self.assertEqual(receive()["type"], "websocket.connect")
+                        send({"type": "websocket.accept"})
+                        while True:
+                            event = receive()
+                            handlers.append(get_ident())
+                            if event["type"] == "websocket.disconnect":
+                                return
+                            send({"type": "websocket.send", "text": tag.get()})
+                    application = Wrapped.as_asgi(transport=transport, channel_layer_provider=Provider(), **options)
+                    self.assertEqual(lookups, [])
+                    incoming.put({"type": "websocket.connect"})
+                    context = contextvars.copy_context()
+                    context.run(tag.set, "connection")
+                    def run():
+                        try:
+                            application(scope, incoming.get, sent.put)
+                        except BaseException as error:
+                            failures.put(error)
+                    thread = Thread(target=lambda: context.run(run))
+                    thread.start()
+                    try:
+                        self.assertEqual(sent.get(timeout=2)["type"], "websocket.accept")
+                        layer.group_send(group, {"type": "notice", "value": "broadcast"})
+                        self.assertEqual(sent.get(timeout=2)["text"], "broadcast")
+                        incoming.put({"type": "websocket.receive", "text": "client"})
+                        self.assertEqual(sent.get(timeout=2)["text"], "channel-event")
+                    finally:
+                        incoming.put({"type": "websocket.disconnect", "code": 1000})
+                        thread.join(3)
+                    self.assertFalse(thread.is_alive())
+                    self.assertTrue(failures.empty())
+                    self.assertEqual(lookups, [thread.ident])
+                    self.assertEqual(handlers, [thread.ident] * 3)
+                    self.assertFalse(layer.closed)
+                    self.assertTrue(layer.thread.is_alive())
+                    async def groups():
+                        return layer.backend.groups
+                    self.assertEqual(layer._call(groups), {})
+
+    def test_transport_and_provider_reject_coroutines_without_leaking_ownership(self):
+        from types import SimpleNamespace
+        from channels.layers import InMemoryChannelLayer
+        from asgi_function_profile.channels import FunctionChannelLayer, TransportConsumer
+        async def asynchronous(*args):
+            pass
+        with FunctionChannelLayer(InMemoryChannelLayer) as layer:
+            for hook in ("provider", "transport"):
+                with self.subTest(hook=hook):
+                    result = asynchronous()
+                    provider = SimpleNamespace(get=lambda: result if hook == "provider" else layer)
+                    sent = []
+                    consumer = TransportConsumer(transport=lambda *args: result, channel_layer_provider=provider,
+                                                 groups=("room",))
+                    with self.assertRaisesRegex(TypeError, "ordinary functions"):
+                        consumer({"type": "websocket"}, lambda: {"type": "websocket.connect"}, sent.append)
+                    self.assertIsNone(result.cr_frame)
+                    self.assertFalse(layer.closed)
+                    if hook == "transport":
+                        self.assertEqual(sent, [{"type": "websocket.close", "code": 1011}])
+                    async def groups():
+                        return layer.backend.groups
+                    self.assertEqual(layer._call(groups), {})
+
     def test_native_group_events_context_and_cleanup(self):
         from channels.layers import InMemoryChannelLayer
         from asgi_function_profile.channels import FunctionChannelLayer, JsonWebsocketConsumer

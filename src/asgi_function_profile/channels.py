@@ -528,6 +528,34 @@ class Consumer:
         self._membership.discard(group)
 
 
+class TransportConsumer(Consumer):
+    """Wrap an ordinary WebSocket transport with channel-event dispatch.
+
+    The provider's get() runs on invocation, not construction. Its layer is
+    borrowed; the provider owner closes it after all consumers finish. groups
+    uses the same class convention as WebsocketConsumer, with an optional
+    constructor override. Named channel handlers and deployment policy belong
+    in subclasses. The transport owns socket input and protocol handling.
+    """
+
+    groups = ()
+
+    def __init__(self, *, transport, channel_layer_provider, groups=None):
+        self.transport = transport
+        self.channel_layer_provider = channel_layer_provider
+        if groups is not None:
+            self.groups = tuple(groups)
+
+    def __call__(self, scope, receive, send):
+        self.channel_layer = _ordinary(self.channel_layer_provider.get)
+        return super().__call__(scope, receive, send)
+
+    def run(self, receive):
+        for group in self.groups:
+            self.join_group(group)
+        return _ordinary(self.transport, self.scope, receive, self.send)
+
+
 class WebsocketConsumer(Consumer):
     groups = ()
 

@@ -8,7 +8,7 @@ import graphene
 import graphql_server
 from django.db import connections
 from django.test import override_settings
-from asgi_function_profile.channels import Consumer
+from asgi_function_profile.channels import TransportConsumer
 from asgi_function_profile.channels_graphene import Subscription, bind_subscriptions
 from asgi_function_profile.django_channels import DjangoChannelLayerProvider
 from asgi_function_profile.graphene import GrapheneDjangoWebSocket
@@ -72,10 +72,9 @@ class Root(graphene.ObjectType):
     notice = Notice.Field()
 
 
-class Wrapper(Consumer):
-    def run(self, receive):
-        self.join_group("transport-drain")
-        return transport(self.scope, receive, self.send)
+class Wrapper(TransportConsumer):
+    groups = ("transport-drain",)
+
     def transport_drain(self, event):
         self.send({"type": "websocket.close", "code": 1001})
 
@@ -91,7 +90,7 @@ def application(scope, receive, send):
                 raise OSError("injected websocket close failure")
             return send(event)
         try:
-            return Wrapper()(scope, receive, socket_send)
+            return Wrapper(transport=transport, channel_layer_provider=layers)(scope, receive, socket_send)
         finally:
             assert all(connection.connection is None for connection in connections.all())
             if failed_close:
@@ -103,7 +102,6 @@ def application(scope, receive, send):
         event = receive()
         if event["type"] == "lifespan.startup":
             layer = layers.get()
-            Wrapper.channel_layer = layer
             schema = bind_subscriptions(graphene.Schema(query=Query, mutation=Mutation, subscription=Root),
                                         channel_layer_provider=layers)
             transport = GrapheneDjangoWebSocket(schema, **{**graphql_server.options, "connection_init_timeout": 5})

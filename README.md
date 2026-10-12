@@ -73,6 +73,14 @@ Keep these boundaries when contributing:
   dependencies can otherwise make whole suites skip; report skipped or blocked
   checks rather than treating them as validation.
 
+This repository also incubates integrations that could eventually be contributed
+to Django, Channels, GraphQL frameworks, Sentry, or their companion projects.
+Follow their public interfaces and conventions, keep dependencies optional and
+integrations independently testable, and accept application policy through hooks.
+Each addition should solve a demonstrated integration need and have a coherent
+possible home in its framework. Upstream acceptance remains a goal to establish
+with the respective maintainers.
+
 ### Current position and remaining questions
 
 The adapter, Django HTTP integration, authenticated synchronous WebSockets,
@@ -100,7 +108,9 @@ Both socket and group handlers run on the scope thread, with bounded read-ahead
 and unchanged channel backends. Memberships joined through the consumer are
 renewed until cleanup. A cancellable `ChannelEvents` iterator reuses the same
 backend boundary; local overflow ends the stream instead of silently discarding
-control events. Consumers can wrap an ordinary transport through `run(receive)`.
+control events. `TransportConsumer` wraps an ordinary transport with lazy provider
+lookup, group membership and named channel handlers; `run(receive)` remains the
+underlying composition hook. Applications supply deployment event policy.
 Tests cover authenticated ORM work, Sentry error attribution and graceful
 shutdown; earlier local probes cover 128 sockets. Each layered consumer still
 uses one additional socket-reader thread. Deterministic tests
